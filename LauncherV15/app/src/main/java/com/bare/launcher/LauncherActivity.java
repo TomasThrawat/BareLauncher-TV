@@ -1331,12 +1331,6 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // Install the zero-dependency crash sink BEFORE we do anything
-        // else that could fault. From this point on any uncaught throwable
-        // on any thread gets timestamped and appended to
-        // <internalFiles>/crash.log so a remote user can pull a real
-        // trace (no Crashlytics / Sentry / etc. — see CrashLogger javadoc).
-        CrashLogger.install(this);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         DisplayMetrics dm = getResources().getDisplayMetrics();
         density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels;
@@ -5241,7 +5235,6 @@ public class LauncherActivity extends Activity {
                     // one fired by a package-add broadcast) becomes a silent
                     // no-op for the lifetime of the activity. Reset the
                     // flag and bail; logcat surfaces the trace via the
-                    // CrashLogger sink installed in onCreate.
                     appsLoading.set(false);
                     return;
                 }
@@ -5765,7 +5758,7 @@ public class LauncherActivity extends Activity {
         // Final fallback: bare ACTION_MAIN + component. Same shape as the
         // primary path minus the category + package, included as a last
         // resort for the rarest "PM resolution refuses but explicit
-        // component still launches" case observed in CrashLogger logs.
+        // component still launches" case observed on some TV ROMs.
         try {
             Intent d = new Intent(Intent.ACTION_MAIN);
             d.setComponent(app.component); d.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -8607,7 +8600,6 @@ public class LauncherActivity extends Activity {
             else
                 registerReceiver(packageReceiver, f);
         } catch (SecurityException | IllegalStateException ignored) {
-            // logged via CrashLogger if it fires anywhere above this frame
         }
     }
 
