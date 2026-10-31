@@ -18,7 +18,9 @@ jobs:
       - run:
           name: Prepare Android SDK 36
           command: |
-            yes | sdkmanager --sdk_root="${ANDROID_HOME}" --licenses >/dev/null
+            set +o pipefail
+            yes | sdkmanager --sdk_root="${ANDROID_HOME}" --licenses
+            set -o pipefail
             sdkmanager --sdk_root="${ANDROID_HOME}" --install \
               "platforms;android-36" \
               "build-tools;36.0.0" \
