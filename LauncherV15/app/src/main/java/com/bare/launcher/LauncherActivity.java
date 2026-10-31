@@ -96,13 +96,6 @@ public class LauncherActivity extends Activity {
     // finer would be 59 wakeups per minute of pure waste.
     private static final String PREFS          = "bare_launcher";
     private static final String KEY_WP_URI     = "wp_uri";
-    /** Slideshow: picked folder (SAF tree URI string), the rotation setting
-     *  ({@code 0}=off, {@code 1}=each restart, {@code 5..60}=minutes), and the
-     *  current sequential position. */
-    private static final String KEY_SLIDESHOW_FOLDER = "slideshow_folder";
-    private static final String KEY_SLIDESHOW_DURATION = "slideshow_duration_sec";
-    private static final String KEY_SLIDESHOW_RESTART  = "slideshow_restart";
-    private static final String KEY_SLIDESHOW_INDEX  = "slideshow_index";
     private static final String KEY_SCROLL_IDX = "scroll_idx";
     private static final String KEY_APP_ORDER  = "app_order";
     /** v1.5.0: number of leading apps (in the visible / non-hidden order)
@@ -129,32 +122,12 @@ public class LauncherActivity extends Activity {
     // remote-key shortcut. Loaded once at startup into hiddenApps; saved
     // synchronously on every toggle.
     private static final String KEY_HIDDEN     = "hidden_apps";
-    /** Persisted "show clock" preference. true = clock pill rendered with
-     *  a "EEE · h:mm a" date prefix (locale-aware short day-of-week);
-     *  false = clock pill hidden entirely and no minute tick scheduled.
-     *  v1.3.0 introduced this toggle alongside the unified settings panel.
-     *  Default true so existing installs see no behaviour change. */
-    private static final String KEY_SHOW_CLOCK = "show_clock";
-    /** v1.4.9: 3-state clock display mode (replaces the boolean show/hide).
-     *  Persisted as an int; see {@link #CLOCK_FULL} / {@link #CLOCK_TIME_ONLY}
-     *  / {@link #CLOCK_OFF}. {@link #KEY_SHOW_CLOCK} is still read once for
-     *  migration of pre-v1.4.9 installs. */
-    private static final String KEY_CLOCK_MODE = "clock_mode";
     private static final int    MATCH          = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int    WRAP           = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final int    REQ_PICK_WP    = 42;
     private static final int    REQ_BACKUP_EXPORT = 43;
     private static final int    REQ_BACKUP_IMPORT = 44;
-    private static final int    REQ_PERM_MEDIA = 71;   // runtime media-read permission
     private static final String BACKUP_FILENAME   = "barelauncher-settings.txt";
-    /** Slideshow duration steps (seconds):
-     *  Off, 20s, 30s, 45s, 1m, 1.5m, 2m, 3m. */
-    private static final int[]  SLIDESHOW_STEPS_SEC =
-            { 0, 20, 30, 45, 60, 90, 120, 180 };
-    /** Interval auto-enabled when a folder is picked while the slideshow is
-     *  completely off. Must be a member of {@link #SLIDESHOW_STEPS_SEC}. */
-    private static final int    SLIDESHOW_DEFAULT_SEC = 30;
-
     // Subtle focus pop — animations toned down for performance / stability.
     // No vertical lift (saves a frame of layout work and removes a class of
     // visual jitter on slow TV ROMs). Scale is small enough to read as
@@ -293,88 +266,11 @@ public class LauncherActivity extends Activity {
     // the activity now only deals with scheduling / TextView wiring.
     private final ClockFormatter clockFmt = new ClockFormatter();
 
-    /** Mirror of {@link #KEY_SHOW_CLOCK} loaded once at startup. The
-     *  settings panel toggle writes the pref synchronously and updates
-     *  this field + the {@link #clockView} visibility / tick scheduling
-     *  in one step. Default {@code true} preserves v1.2.x behaviour for
-     *  existing installs. */
-    private boolean showClock  = true;
-    /** 3-state clock display, cycled by the settings "Clock" row:
-     *  FULL = big time + small day/date line; TIME_ONLY = big time only;
-     *  OFF = hidden. {@link #showClock} stays as the convenience gate
-     *  ({@code clockMode != CLOCK_OFF}) so existing tick/visibility code
-     *  is untouched. */
-    private static final int CLOCK_FULL = 0, CLOCK_TIME_ONLY = 1, CLOCK_OFF = 2;
-    private int clockMode = CLOCK_FULL;
+    /** The clock is permanently displayed in full time + date mode. */
     // Tracks the system 12/24-hour preference; re-detected in startClock()
     // so a change in Settings → Date & time is picked up on the next
     // onResume without a ContentObserver.
     private boolean is24Hour   = false;
-
-    // ── Wallpaper slideshow state (all UI-thread) ────────────────────────
-    /** Picked folder tree-URI string, or {@code null} when no folder is set. */
-    private String  slideshowFolderUri = null;
-    /** Rotation interval in SECONDS: 0 = off, else one of {@link #SLIDESHOW_STEPS_SEC}. */
-    private int     slideshowDurationSec = 0;
-    /** "Change wallpaper on each restart" toggle (independent of the timer). */
-    private boolean slideshowRestart   = false;
-    /** Sequential position within {@link #slideshowImages}. */
-    private int     slideshowIndex     = 0;
-    /** Cached child image document-URI strings for the folder; {@code null}
-     *  until enumerated (off the UI thread). Volatile because it is written
-     *  on the app executor and read on the UI thread. */
-    private volatile String[] slideshowImages = null;
-    /** Guards the once-per-process "each restart" image change so returning
-     *  from another app doesn't re-roll the wallpaper. */
-    private boolean slideshowRestartApplied = false;
-    /** Retry counter for MediaStore enumeration failures (e.g., device reboot
-     *  when MediaStore isn't ready yet). Capped at 3 retries to prevent
-     *  infinite loops if MediaStore is genuinely broken. */
-    private int slideshowEnumerationRetries = 0;
-    /** Foreground-only rotation tick. Re-posted by itself; cancelled in
-     *  {@link #onPause} so the slideshow never runs (or wakes the device) in
-     *  the background. */
-    private final Runnable slideshowTick = new Runnable() {
-        @Override public void run() {
-            if (destroyed) return;
-            advanceSlideshow();
-            if (slideshowDurationSec > 0 && !uiPaused) {
-                uiHandler.postDelayed(this, slideshowDurationSec * 1000L);
-            }
-        }
-    };
-
-    // ── Slideshow folder picker (custom TV-native, MediaStore-backed) ────
-    private FrameLayout                 folderPickerOverlay = null;
-    private android.widget.LinearLayout folderPickerCard    = null;
-    private android.widget.LinearLayout folderPickerCol     = null;
-    private android.widget.ScrollView   folderPickerScroll  = null;
-    /** Rows shown in the picker: each = {bucketId, displayName, count}. */
-    private final java.util.List<String[]> folderPickerData = new ArrayList<>();
-    private int folderPickerSel = 0;
-
-    // ── Idle UI hide (slideshow-only visual cleanup) ─────────────────────
-    /** Idle-hide timeout options in seconds: Off, 1 min, 2 min, 3 min, 5 min. */
-    private static final int[]  IDLE_HIDE_STEPS_SEC = { 0, 60, 120, 180, 300 };
-    private static final String KEY_IDLE_HIDE       = "idle_hide_sec";
-    /** Default idle-hide timeout when slideshow folder is first picked. */
-    private static final int    IDLE_HIDE_DEFAULT_SEC = 120;  // 2 min
-    /** Currently configured idle-hide timeout (0 = off). */
-    private int     idleHideSec    = 0;
-    /** True while the UI is hidden; restored immediately on any key. */
-    private boolean idleHideActive = false;
-    /** Single Runnable posted to {@link #uiHandler} after each user action.
-     *  Cancelled on key press, onPause, and when slideshow becomes inactive. */
-    private final Runnable idleHideTrigger = new Runnable() {
-        @Override
-        public void run() {
-            if (!destroyed && !uiPaused && slideshowActive() && idleHideSec > 0
-                    && !anyOverlayLogicallyOpen()) {
-                applyIdleHide(true);
-            }
-        }
-    };
-
 
     private final Runnable clockTick = new Runnable() {
         @Override public void run() {
@@ -390,17 +286,12 @@ public class LauncherActivity extends Activity {
     };
 
     /** Refresh the clock TextView. Updates the digits on the minute boundary
-     *  with no fade animation — simpler and stabler. The {@link #showClock}
-     *  preference gates everything: when off the method short-circuits
-     *  before any allocation or canvas-touching work. When on, the
-     *  formatter renders with the locale-aware short day-of-week prefix
-     *  (the time + date toggle is bundled in v1.3.0 so a single user
-     *  preference controls both). */
+     *  with no fade animation — simpler and stabler. The formatter always
+     *  renders the full time and day/date line. */
     private void tickClock(long now) {
         TextView cv = clockView;
         if (cv == null) return;
-        if (!showClock) return;
-        boolean withDate = (clockMode == CLOCK_FULL);
+        boolean withDate = true;
         if (!clockFmt.shouldRepaint(now, withDate, is24Hour)) return; // no visible change
         cv.setText(clockFmt.format(now, withDate, is24Hour), TextView.BufferType.SPANNABLE);
     }
@@ -702,7 +593,7 @@ public class LauncherActivity extends Activity {
     private final ArraySet<String>      hiddenApps        = new ArraySet<>();
     // Manage-hidden-apps used to live as a 7th, visually-offset row at
     // the bottom of the slot column. v1.3.0 moves it into the unified
-    // settings panel (alongside Set wallpaper / Show clock / System
+    // settings panel (alongside Set wallpaper / Backup & restore / System
     // Settings). The keymap card is now exclusively key-binding rows.
     // The HIDE sub-mode the manage row used to enter still exists and
     // is reachable from the settings panel's "Manage hidden apps" row.
@@ -751,7 +642,7 @@ public class LauncherActivity extends Activity {
     //
     // Top-level overlay that opens as a dropdown under the gear button
     // and holds five rows: Manage hidden apps, Button shortcuts, Set
-    // wallpaper, Show clock toggle, System Settings. Replaces the
+    // wallpaper, Backup & restore, System Settings. Replaces the
     // wallpaper toolbar pill (deleted) and the "Manage hidden apps" 7th
     // row that used to live inside the keymap card. Same visual language
     // as the keymap card (dark slate plate + 1 dp white rim, drop-down
@@ -789,38 +680,6 @@ public class LauncherActivity extends Activity {
      *  SLOTS and dismiss the keymap card so the panel re-opens. */
     private boolean                     hideManagerSkipSlotsOnExit = false;
 
-    // ── About overlay (v1.4.9) ───────────────────────────────────────────
-    // Drill-through card opened from the settings panel's "About" row. Shows
-    // the app version (auto, from PackageManager), a Ko-fi support row + QR,
-    // the Downloader code for the latest release, a "check latest on GitHub"
-    // row + QR, and a "Made by Mithun" footer. The two QR-bearing rows are
-    // selectable; the version / code / credit lines carry no selector.
-    private FrameLayout                 aboutOverlay   = null;
-    private android.widget.LinearLayout aboutCard      = null;
-    private android.widget.LinearLayout aboutListView  = null;  // the row list
-    private android.widget.LinearLayout aboutQrView    = null;  // QR sub-view (swaps with the list)
-    private ImageView                   aboutQrImage   = null;
-    private TextView                    aboutQrCaption = null;
-    /** Clickable link shown beneath the QR (opens the same URL in the user's
-     *  browser, for devices that have one). The Ko-fi QR shows the raw URL;
-     *  the GitHub QR shows a short "BareLauncher latest version" label. */
-    private TextView                    aboutQrLink    = null;
-    /** URL the {@link #aboutQrLink} / QR-page OK press opens. Set by
-     *  {@link #showAboutQr(int)} to match the currently shown QR. */
-    private String                      aboutQrUrl     = null;
-    private final android.widget.LinearLayout[] aboutRows = new android.widget.LinearLayout[2];
-    private int                         aboutSelectedRow = 0;
-    private boolean                     aboutOpenedFromSettings = false;
-    private boolean                     aboutShowingQr = false;
-    /** 0 = Ko-fi support, 1 = GitHub latest release. */
-    private static final int ABOUT_ROW_KOFI = 0, ABOUT_ROW_GITHUB = 1;
-    // ⚠ EDIT THESE: your Ko-fi page URL and the Downloader app code that
-    // resolves to your latest GitHub release APK. Placeholders until set.
-    private static final String ABOUT_KOFI_URL       = "https://ko-fi.com/barelauncher";
-    private static final String ABOUT_DOWNLOADER_CODE = "3465597";
-    private static final String ABOUT_GITHUB_RELEASES =
-            "https://github.com/f102mithunysypdlcjr-pixel/BareLauncherv3/releases/latest";
-
     /** Single shared dim backdrop View added to {@link #root} in
      *  {@link #buildLayout}. Both the settings panel and the keymap
      *  card reference it via {@link #ensureOverlayBackdropVisible} /
@@ -833,91 +692,50 @@ public class LauncherActivity extends Activity {
      *  constant across the entire modal flow. */
     private View                        overlayBackdrop = null;
 
-    /** Settings panel "pages": the main list, plus the Wallpaper/Slideshow and
-     *  Backup/Restore sub-views. Navigating into a sub-page rebuilds the row
-     *  column; BACK returns to MAIN. */
-    private static final int SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2;
+    /** Settings panel pages: the main list and Backup/Restore. */
+    private static final int SPAGE_MAIN = 0, SPAGE_BACKUP = 1;
     private int settingsPage = SPAGE_MAIN;
 
-    // Stable settings-row identifiers (NOT list positions — the panel is now
-    // page-based, so identity must be position-independent).
-    private static final int SR_HIDE_APPS          = 0;
-    private static final int SR_KEYMAP             = 1;
-    private static final int SR_WALLPAPER_MENU     = 2;   // → SPAGE_WALLPAPER
-    private static final int SR_CLOCK              = 3;
-    private static final int SR_BACKUP_MENU        = 4;   // → SPAGE_BACKUP
-    private static final int SR_SYSTEM             = 5;
-    private static final int SR_ABOUT              = 6;
-    private static final int SR_SET_WALLPAPER      = 7;
-    private static final int SR_SLIDESHOW_FOLDER   = 8;
-    private static final int SR_SLIDESHOW_DURATION = 9;
-    private static final int SR_SLIDESHOW_RESTART  = 10;
-    private static final int SR_BACKUP             = 11;
-    private static final int SR_RESTORE            = 12;
-    private static final int SR_IDLE_HIDE          = 13;  // hide UI when idle (slideshow sub-page)
+    // Stable row identifiers; Set wallpaper remains directly on the main page.
+    private static final int SR_HIDE_APPS = 0;
+    private static final int SR_KEYMAP = 1;
+    private static final int SR_SET_WALLPAPER = 2;
+    private static final int SR_BACKUP_MENU = 3;
+    private static final int SR_SYSTEM = 4;
+    private static final int SR_BACKUP = 5;
+    private static final int SR_RESTORE = 6;
 
     private static final int[] SROWS_MAIN = {
-            SR_HIDE_APPS, SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK,
-            SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT };
-    private static final int[] SROWS_WALLPAPER = {
-            SR_SET_WALLPAPER, SR_SLIDESHOW_FOLDER, SR_SLIDESHOW_DURATION,
-            SR_SLIDESHOW_RESTART, SR_IDLE_HIDE };
-    private static final int[] SROWS_BACKUP = {
-            SR_BACKUP, SR_RESTORE };
+            SR_HIDE_APPS, SR_KEYMAP, SR_SET_WALLPAPER, SR_BACKUP_MENU, SR_SYSTEM };
+    private static final int[] SROWS_BACKUP = { SR_BACKUP, SR_RESTORE };
 
     /** Main-list row to re-select when returning from a sub-page. */
-    private int settingsReturnRowId = SR_WALLPAPER_MENU;
+    private int settingsReturnRowId = SR_BACKUP_MENU;
 
     /** Row IDs of the page currently shown. */
     private int[] settingsPageRows() {
-        switch (settingsPage) {
-            case SPAGE_WALLPAPER: return SROWS_WALLPAPER;
-            case SPAGE_BACKUP:    return SROWS_BACKUP;
-            default:              return SROWS_MAIN;
-        }
+        return settingsPage == SPAGE_BACKUP ? SROWS_BACKUP : SROWS_MAIN;
     }
 
     /** Label resource for a row id. */
     private static int settingsRowLabelRes(int rowId) {
         switch (rowId) {
-            case SR_HIDE_APPS:          return R.string.settings_row_manage_hidden;
-            case SR_KEYMAP:             return R.string.settings_row_button_shortcuts;
-            case SR_WALLPAPER_MENU:     return R.string.settings_row_wallpaper_menu;
-            case SR_CLOCK:              return R.string.settings_row_show_clock;
-            case SR_BACKUP_MENU:        return R.string.settings_row_backup_menu;
-            case SR_SYSTEM:             return R.string.settings_row_system_settings;
-            case SR_ABOUT:              return R.string.settings_row_about;
-            case SR_SET_WALLPAPER:      return R.string.settings_row_set_wallpaper;
-            case SR_SLIDESHOW_FOLDER:   return R.string.settings_row_slideshow_folder;
-            case SR_SLIDESHOW_DURATION: return R.string.settings_row_slideshow_duration;
-            case SR_SLIDESHOW_RESTART:  return R.string.settings_row_slideshow_restart;
-            case SR_IDLE_HIDE:          return R.string.settings_row_idle_hide;
-            case SR_BACKUP:             return R.string.settings_row_backup;
-            case SR_RESTORE:            return R.string.settings_row_restore;
-            default:                    return R.string.settings_row_about;
+            case SR_HIDE_APPS:     return R.string.settings_row_manage_hidden;
+            case SR_KEYMAP:        return R.string.settings_row_button_shortcuts;
+            case SR_SET_WALLPAPER: return R.string.settings_row_set_wallpaper;
+            case SR_BACKUP_MENU:   return R.string.settings_row_backup_menu;
+            case SR_SYSTEM:        return R.string.settings_row_system_settings;
+            case SR_BACKUP:        return R.string.settings_row_backup;
+            case SR_RESTORE:       return R.string.settings_row_restore;
+            default:               return R.string.settings_row_system_settings;
         }
     }
 
-    /** Settings rows that show a right-side state indicator. */
-    private static boolean settingsRowHasIndicator(int rowId) {
-        return rowId == SR_CLOCK
-            || rowId == SR_SLIDESHOW_FOLDER
-            || rowId == SR_SLIDESHOW_DURATION
-            || rowId == SR_SLIDESHOW_RESTART
-            || rowId == SR_IDLE_HIDE;
-    }
+    /** No remaining settings rows have a right-side state indicator. */
+    private static boolean settingsRowHasIndicator(int rowId) { return false; }
 
-    /** Widest state string an indicator row can show, used to reserve width at
-     *  build time so the live value never clips the label. */
-    private static String settingsIndicatorWidestText(int rowId) {
-        switch (rowId) {
-            case SR_SLIDESHOW_FOLDER:   return "Not set";
-            case SR_SLIDESHOW_DURATION: return "< 1.5 min >";   // widest bracketed label
-            case SR_SLIDESHOW_RESTART:  return "Off";
-            case SR_IDLE_HIDE:          return "< 5 min >";     // widest bracketed label
-            default:                    return "Full";           // SR_CLOCK
-        }
-    }
+    /** Reserved only for the optional indicator slot; no current row uses it. */
+    private static String settingsIndicatorWidestText(int rowId) { return ""; }
 
     /** Index of {@code rowId} within the MAIN page (0 if absent). */
     private static int mainRowIndex(int rowId) {
@@ -1349,7 +1167,7 @@ public class LauncherActivity extends Activity {
      *  alloc / save-restore). */
     private void beginHomeFadeIn() {
         fadeViewIn(shelf);
-        if (showClock) fadeViewIn(clockView);
+        fadeViewIn(clockView);
         fadeViewIn(ringView);
         // Toolbar pills fade in to their dim idle alpha (0.6 — the rest value
         // their own focus listeners use), so an unfocused pill lands correctly
@@ -1409,7 +1227,7 @@ public class LauncherActivity extends Activity {
         View nb = netBtn;        if (nb != null) nb.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
         View mb = mapperBtnView; if (mb != null) mb.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
         TextView cv = clockView;
-        if (cv != null) cv.setVisibility(visible ? (showClock ? View.VISIBLE : View.GONE) : View.INVISIBLE);
+        if (cv != null) cv.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
     }
 
     /** Launch the system uninstall flow for {@code app}. Shared by the drawer
@@ -1559,18 +1377,6 @@ public class LauncherActivity extends Activity {
             // user-visible behaviour stays identical regardless of which
             // delivery path the platform chose.
             backInvokedCallback = () -> {
-                // 0. Slideshow folder picker open → close it (top-most modal).
-                FrameLayout fp = folderPickerOverlay;
-                if (fp != null && fp.getVisibility() == View.VISIBLE) {
-                    hideFolderPicker();
-                    return;
-                }
-                // 0b. About overlay open → its own Back (QR → list, list → settings).
-                FrameLayout ab = aboutOverlay;
-                if (ab != null && ab.getVisibility() == View.VISIBLE) {
-                    handleAboutKey(KeyEvent.KEYCODE_BACK);
-                    return;
-                }
                 // 1. Keymap overlay open → close it.
                 FrameLayout ko = keymapOverlay;
                 if (ko != null && ko.getVisibility() == View.VISIBLE) {
@@ -1635,13 +1441,6 @@ public class LauncherActivity extends Activity {
         registerTimeReceiver();
         registerNetworkCallback();   // live WiFi-state for the netBtn glyph
         refreshWifiState();          // pick up any change while we were away
-        // Wallpaper slideshow: resume the foreground rotation timer, and (once
-        // per process) roll to a new image in "each restart" mode. Both are
-        // no-ops when slideshow is off / no folder is set. Done after the
-        // instant snapshot has already painted, so cold start stays instant.
-        restartSlideshowTimer();
-        slideshowRestartAdvanceOnce();
-        scheduleIdleHide();
         if (pkgChangedWhilePaused) { pkgChangedWhilePaused = false; loadApps(); }
         // v1.5.x: finish the drawer teardown deferred from onPause (see
         // drawerWasOpenAtPause). Done here, not in onPause, so the app-launch
@@ -1757,8 +1556,6 @@ public class LauncherActivity extends Activity {
         uiPaused = true;
         stopClock();
         unregisterTimeReceiver();
-        uiHandler.removeCallbacks(slideshowTick);   // stop slideshow rotation while backgrounded
-        cancelAndRestoreIdleHide();                 // restore UI instantly, cancel timer
         // v1.5.x: if the drawer is open when we pause, persist any in-progress
         // move, but DO NOT restore the home shelf here. Repainting the home
         // screen now puts it into the frame the system snapshots for the
@@ -1870,11 +1667,6 @@ public class LauncherActivity extends Activity {
         netBtn = null; ringView = null; root = null;
         mapperBtnView = null;
         settingsOverlay = null; settingsCard = null; settingsColumn = null;
-        folderPickerOverlay = null; folderPickerCard = null; folderPickerCol = null; folderPickerScroll = null;
-        aboutOverlay = null; aboutCard = null; aboutListView = null;
-        aboutQrView = null; aboutQrImage = null; aboutQrCaption = null;
-        aboutQrLink = null; aboutQrUrl = null;
-        aboutRows[0] = null; aboutRows[1] = null;
         menuOverlay = null; menuHide = null; menuUninstall = null; menuAppInfo = null; menuMove = null;
         keymapOverlay = null; keymapColumn = null; keymapCard = null;
         keymapPickerView = null; keymapPickerTitle = null;
@@ -1991,14 +1783,6 @@ public class LauncherActivity extends Activity {
 
     @Override @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        FrameLayout fp = folderPickerOverlay;
-        if (fp != null && fp.getVisibility() == View.VISIBLE) {
-            hideFolderPicker(); return;
-        }
-        FrameLayout ao = aboutOverlay;
-        if (ao != null && ao.getVisibility() == View.VISIBLE) {
-            handleAboutKey(KeyEvent.KEYCODE_BACK); return;
-        }
         FrameLayout sp = settingsOverlay;
         if (sp != null && sp.getVisibility() == View.VISIBLE) {
             hideSettingsPanel(); return;
@@ -2176,11 +1960,6 @@ public class LauncherActivity extends Activity {
         // suits the larger plate-less digits.
         clockView.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         clockView.setLetterSpacing(0.01f);
-        // If the user has the clock off, hide it before the first paint so
-        // cold start never flashes a visible-then-hidden clock. {@link
-        // #startClock} also enforces this on every resume, but doing it here
-        // avoids the one-frame visibility flicker on slow-laying-out ROMs.
-        if (!showClock) clockView.setVisibility(View.GONE);
         root.addView(clockView);
 
         // Minimal-pill sizing. Earlier values (52 / 36 / 6 / 18 / 20) read
@@ -4287,30 +4066,6 @@ public class LauncherActivity extends Activity {
                     drawIcon(canvas, cx, icy);
                 }
 
-                // Show label: always for focused+normal, always for drag target in reorder.
-                //
-                // The !rebuildingApps guard closes a gap the ring-position
-                // fix above doesn't: isFocused() reads real, low-level
-                // Android focus state directly, completely bypassing
-                // CellView's own OnFocusChangeListener (and therefore the
-                // rebuildingApps suppression inside it). During the
-                // teardown-and-rebuild window the platform can genuinely,
-                // if transiently, hand real focus to some other still-
-                // attached cell as a side effect of the GONE calls -- the
-                // ring correctly ignores that now, but onDraw() doesn't go
-                // through the listener at all, so isFocused() would still
-                // honestly report "yes" for whichever cell the platform
-                // picked and draw ITS label for a frame: a small, fast
-                // label flash on the wrong cell with the ring itself
-                // staying put. Suppressing the label the same way the ring
-                // is suppressed -- for the identical window, using the
-                // identical flag -- closes this the same way.
-                boolean showLabel = (!labelDisplay.isEmpty()) &&
-                        ((isFocused() && !reorderMode && !rebuildingApps) || isDragTarget);
-                if (showLabel) {
-                    float labelY = icy + labelOffsetY;
-                    if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
-                }
             }
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
@@ -5381,21 +5136,6 @@ public class LauncherActivity extends Activity {
                 } else {
                     drawIcon(canvas, cx, icy);
                 }
-                // The !rebuildingApps guard mirrors CellView.onDraw's
-                // identical fix: isFocused() reads real platform focus
-                // directly, bypassing DrawerCell's own focus-listener (and
-                // therefore the rebuildingApps suppression inside it). During
-                // the teardown-and-rebuild window a transient platform focus
-                // reassignment would otherwise still make this draw the
-                // label on the wrong cell for a frame even though the ring
-                // itself is correctly suppressed. See RecyclingShelfView's
-                // rebuildingApps for the full history.
-                boolean showLabel = (!labelDisplay.isEmpty())
-                        && ((isFocused() && !reorderMode && !rebuildingApps) || isDragTarget);
-                if (showLabel) {
-                    float labelY = icy + labelOffsetY;
-                    if (labelY < h) canvas.drawText(labelDisplay, cx, labelY, labelPaint);
-                }
             }
 
             private void drawIcon(Canvas canvas, float cx, float icy) {
@@ -6302,40 +6042,6 @@ public class LauncherActivity extends Activity {
      *       storms on a held key. */
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        // If the idle-hide UI is active, the first key wakes it up.
-        // Swallow the key so it doesn't simultaneously open an app or
-        // activate a button shortcut. Re-arm the idle timer so the UI
-        // stays visible while the user is active.
-        if (idleHideActive) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                applyIdleHide(false);
-                scheduleIdleHide();
-            }
-            return true;  // swallow UP edge too so nothing bleeds through
-        }
-        // Any key press resets the idle timer (user is active).
-        if (event.getAction() == KeyEvent.ACTION_DOWN) scheduleIdleHide();
-        FrameLayout ao = aboutOverlay;
-        if (ao != null && ao.getVisibility() == View.VISIBLE) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                if (handleAboutKey(event.getKeyCode())) return true;
-                return super.dispatchKeyEvent(event);
-            }
-            // Mirror the settings panel's KEY_UP contract: only swallow the
-            // UP edge of keys we consume on DOWN; let device-control keys
-            // (volume / power / media) reach the platform.
-            if (isLetThroughKey(event.getKeyCode())) return super.dispatchKeyEvent(event);
-            return true;
-        }
-        FrameLayout fp = folderPickerOverlay;
-        if (fp != null && fp.getVisibility() == View.VISIBLE) {
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                if (handleFolderPickerKey(event.getKeyCode())) return true;
-                return super.dispatchKeyEvent(event);
-            }
-            if (isLetThroughKey(event.getKeyCode())) return super.dispatchKeyEvent(event);
-            return true;
-        }
         FrameLayout ko = keymapOverlay;
         if (ko != null && ko.getVisibility() == View.VISIBLE) {
             if (handleKeymapOverlayKey(event)) return true;
@@ -6388,16 +6094,15 @@ public class LauncherActivity extends Activity {
     //
     // Top-level overlay that opens as a dropdown under the gear toolbar
     // pill. Five rows: Manage hidden apps, Button shortcuts, Set
-    // wallpaper, Show clock toggle, System Settings. Visual language
+    // wallpaper, Backup / Restore, and System Settings. Visual language
     // matches the keymap card (deep slate plate + 1 dp white rim, drop-
     // down animation pivoted at the gear's top-right corner). Same
     // selection vocabulary too: idle row transparent + light-grey text,
     // selected row a bright frosted-white pill with dark text.
     //
     // Drill-through actions (hide apps, button shortcuts, wallpaper,
-    // system settings) close the panel before launching the next
-    // surface. The Show clock toggle stays in place — the user can flip
-    // it and continue browsing the panel. The keymap card knows it was
+    // backup / restore, system settings) close the panel before launching
+    // the next surface. The keymap card knows it was
     // opened from the panel via {@link #keymapOpenedFromSettings} and
     // re-opens the panel after the keymap card is dismissed, so a deep
     // "settings → button shortcuts → bind a key → back" gesture lands
@@ -6408,9 +6113,6 @@ public class LauncherActivity extends Activity {
      *  already-open settings panel) is a no-op so the dim level stays
      *  constant across the modal flow. */
     private void ensureOverlayBackdropVisible() {
-        // Any overlay opening cancels idle-hide immediately so the UI is
-        // fully visible while the user interacts with a modal card.
-        cancelAndRestoreIdleHide();
         View bd = overlayBackdrop;
         if (bd == null) return;
         if (bd.getVisibility() == View.VISIBLE && bd.getAlpha() >= 0.99f) return;
@@ -6445,11 +6147,6 @@ public class LauncherActivity extends Activity {
      *  re-open is queued. Drives the backdrop's stay-or-fade decision. */
     private boolean anyOverlayLogicallyOpen() {
         if (keymapOpenedFromSettings) return true;
-        if (aboutOpenedFromSettings) return true;
-        FrameLayout fp = folderPickerOverlay;
-        if (fp != null && fp.getVisibility() == View.VISIBLE) return true;
-        FrameLayout ao = aboutOverlay;
-        if (ao != null && ao.getVisibility() == View.VISIBLE) return true;
         FrameLayout sp = settingsOverlay;
         if (sp != null && sp.getVisibility() == View.VISIBLE) return true;
         FrameLayout ko = keymapOverlay;
@@ -6740,8 +6437,8 @@ public class LauncherActivity extends Activity {
     }
 
     /** Repaint each row to reflect {@link #settingsSelectedRow} and the
-     *  current {@link #showClock} toggle state. Cheap — five rows, each
-     *  a small LinearLayout with two children. The "selected" row gets a
+     *  current selection state. Cheap — a small set of rows. The "selected"
+     *  row gets a
      *  bright frosted-white pill and dark text + dark indicator; idle
      *  rows get transparent backgrounds and light-grey text. */
     private void refreshSettingsRows() {
@@ -6764,40 +6461,9 @@ public class LauncherActivity extends Activity {
                 ((android.graphics.drawable.GradientDrawable) bg)
                         .setColor(sel ? hlWhite : idleBg);
             }
-            View labelView     = row.getChildAt(0);
-            View indicatorView = row.getChildAt(1);
+            View labelView = row.getChildAt(0);
             if (labelView instanceof TextView) {
                 ((TextView) labelView).setTextColor(sel ? selTx : idleTx);
-            }
-            if (indicatorView instanceof TextView) {
-                TextView ind = (TextView) indicatorView;
-                int[] pageRows = settingsPageRows();
-                int rowId = (i < pageRows.length) ? pageRows[i] : -1;
-                if (rowId == SR_CLOCK) {
-                    // 3-state clock indicator: Full / Time / Off.
-                    ind.setText(clockMode == CLOCK_FULL ? "Full"
-                              : clockMode == CLOCK_TIME_ONLY ? "Time" : "Off");
-                    if (clockMode == CLOCK_OFF) ind.setTextColor(sel ? 0x66111114 : 0x66FFFFFF);
-                    else                        ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
-                } else if (rowId == SR_SLIDESHOW_DURATION) {
-                    ind.setText(slideshowDurationLabel());
-                    boolean on = slideshowDurationSec != 0;
-                    ind.setTextColor(on ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
-                } else if (rowId == SR_SLIDESHOW_RESTART) {
-                    ind.setText(slideshowRestart ? "On" : "Off");
-                    ind.setTextColor(slideshowRestart ? (sel ? selTx : 0xFF7DD3FC)
-                                                      : (sel ? 0x66111114 : 0x66FFFFFF));
-                } else if (rowId == SR_SLIDESHOW_FOLDER) {
-                    boolean set = slideshowFolderUri != null;
-                    ind.setText(set ? "Set" : "Not set");
-                    ind.setTextColor(set ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
-                } else if (rowId == SR_IDLE_HIDE) {
-                    ind.setText(idleHideLabel());
-                    boolean on = idleHideSec != 0;
-                    ind.setTextColor(on ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
-                } else {
-                    ind.setTextColor(sel ? selTx : idleTx);
-                }
             }
         }
         // Re-equalise row widths after any indicator text change so the card
@@ -6824,15 +6490,8 @@ public class LauncherActivity extends Activity {
                 if (n > 0) settingsSelectedRow = (settingsSelectedRow + 1) % n;
                 refreshSettingsRows(); return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                int rowId = currentSettingsRowId();
-                if (rowId == SR_SLIDESHOW_DURATION) stepSlideshowDuration(-1);
-                else if (rowId == SR_IDLE_HIDE) stepIdleHide(-1);
-                return true;   // swallow on other rows (panel is modal)
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                rowId = currentSettingsRowId();
-                if (rowId == SR_SLIDESHOW_DURATION) stepSlideshowDuration(+1);
-                else if (rowId == SR_IDLE_HIDE) stepIdleHide(+1);
-                return true;
+                return true;   // no adjustable settings remain
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_BUTTON_A:
@@ -6901,59 +6560,16 @@ public class LauncherActivity extends Activity {
                 hideSettingsPanel();
                 showKeymapOverlay();
                 break;
-            case SR_WALLPAPER_MENU:
-                enterSettingsPage(SPAGE_WALLPAPER, SR_WALLPAPER_MENU);
-                break;
             case SR_BACKUP_MENU:
                 enterSettingsPage(SPAGE_BACKUP, SR_BACKUP_MENU);
-                break;
-            case SR_CLOCK:
-                // 3-state cycle: FULL → TIME_ONLY → OFF → FULL.
-                clockMode = (clockMode + 1) % 3;
-                showClock = (clockMode != CLOCK_OFF);
-                prefs.edit()
-                        .putInt(KEY_CLOCK_MODE, clockMode)
-                        .putBoolean(KEY_SHOW_CLOCK, showClock)
-                        .apply();
-                if (showClock) {
-                    clockFmt.reset();
-                    TextView cvOn = clockView;
-                    if (cvOn != null) cvOn.setVisibility(View.VISIBLE);
-                    startClock();
-                    tickClock(System.currentTimeMillis());
-                } else {
-                    stopClock();
-                    TextView cv = clockView;
-                    if (cv != null) cv.setVisibility(View.GONE);
-                }
-                refreshSettingsRows();
                 break;
             case SR_SYSTEM:
                 hideSettingsPanel();
                 openSystemSettings();
                 break;
-            case SR_ABOUT:
-                pendingSettingsCursor = SR_ABOUT;
-                aboutOpenedFromSettings = true;
-                hideSettingsPanel();
-                showAboutOverlay();
-                break;
             case SR_SET_WALLPAPER:
                 hideSettingsPanel();
                 openStoragePicker();
-                break;
-            case SR_SLIDESHOW_FOLDER:
-                hideSettingsPanel();
-                pickSlideshowFolder();
-                break;
-            case SR_SLIDESHOW_DURATION:
-                stepSlideshowDuration(+1);   // OK advances; LEFT/RIGHT also step
-                break;
-            case SR_SLIDESHOW_RESTART:
-                toggleSlideshowRestart();
-                break;
-            case SR_IDLE_HIDE:
-                stepIdleHide(+1);
                 break;
             case SR_BACKUP:
                 hideSettingsPanel();
@@ -6965,474 +6581,6 @@ public class LauncherActivity extends Activity {
                 break;
             default:
                 break;
-        }
-    }
-
-    // ── About overlay build / show / hide / navigate / QR ───────────────
-
-    /** App version string for the About card header, read from the installed
-     *  package so it always matches the actual build (auto-updates on every
-     *  release without a code change). */
-    private String appVersionName() {
-        try {
-            String v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-            return (v != null) ? "v" + v : "";
-        } catch (Exception e) {
-            return "";
-        }
-    }
-
-    /** Lazy-build the About card on first {@link #showAboutOverlay}. */
-    private void buildAboutOverlay() {
-        FrameLayout r = root; if (r == null) return;
-        FrameLayout ov = new FrameLayout(this) {
-            @Override public boolean onTouchEvent(MotionEvent ev) {
-                if (ev.getAction() == MotionEvent.ACTION_DOWN) {
-                    android.widget.LinearLayout c = aboutCard;
-                    if (c != null) {
-                        float x = ev.getX(), y = ev.getY();
-                        float l = c.getX(), t = c.getY();
-                        float rt = l + c.getWidth(), b = t + c.getHeight();
-                        if (x < l || x > rt || y < t || y > b) { hideAboutOverlay(); return true; }
-                    }
-                }
-                return super.onTouchEvent(ev);
-            }
-        };
-        ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
-        ov.setVisibility(View.GONE);
-        ov.setClickable(true);
-        ov.setFocusable(true);
-
-        android.widget.LinearLayout card = new android.widget.LinearLayout(this);
-        card.setOrientation(android.widget.LinearLayout.VERTICAL);
-        android.graphics.drawable.GradientDrawable cardBg =
-                new android.graphics.drawable.GradientDrawable();
-        cardBg.setColor(0xF21A1A1F);
-        cardBg.setStroke(Math.max(1, dp(1) / 2), 0x1AFFFFFF);
-        cardBg.setCornerRadius(dp(18));
-        card.setBackground(cardBg);
-        card.setPadding(dp(18), dp(14), dp(18), dp(14));
-        card.setClipChildren(false);
-        card.setClipToPadding(false);
-
-        final int contentW = dp(270);
-
-        // ── List sub-view ──
-        android.widget.LinearLayout list = new android.widget.LinearLayout(this);
-        list.setOrientation(android.widget.LinearLayout.VERTICAL);
-
-        // Version (top, no selector) — auto from the installed package.
-        TextView version = new TextView(this);
-        version.setText(getString(R.string.about_app_name) + "   " + appVersionName());
-        version.setTextColor(0xFFFFFFFF);
-        version.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 17);
-        version.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        version.setGravity(Gravity.CENTER_HORIZONTAL);
-        android.widget.LinearLayout.LayoutParams vLp =
-                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
-        vLp.bottomMargin = dp(14);
-        list.addView(version, vLp);
-
-        // Ko-fi support row (selectable, leading cup icon).
-        aboutRows[ABOUT_ROW_KOFI] = buildAboutRow(getString(R.string.about_kofi), makeKofiIcon(), contentW);
-        list.addView(aboutRows[ABOUT_ROW_KOFI]);
-
-        // Downloader code (no selector).
-        TextView code = new TextView(this);
-        code.setText(getString(R.string.about_downloader_code, ABOUT_DOWNLOADER_CODE));
-        code.setTextColor(0xB3FFFFFF);
-        code.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-        code.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-        code.setGravity(Gravity.CENTER_HORIZONTAL);
-        android.widget.LinearLayout.LayoutParams codeLp =
-                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
-        codeLp.topMargin = dp(4);
-        codeLp.bottomMargin = dp(4);
-        list.addView(code, codeLp);
-
-        // GitHub latest-release row (selectable, no icon).
-        aboutRows[ABOUT_ROW_GITHUB] = buildAboutRow(getString(R.string.about_check_github), null, contentW);
-        list.addView(aboutRows[ABOUT_ROW_GITHUB]);
-
-        // Footer credit (no selector).
-        TextView credit = new TextView(this);
-        credit.setText(R.string.about_made_by);
-        credit.setTextColor(0x80FFFFFF);
-        credit.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
-        credit.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-        credit.setGravity(Gravity.CENTER_HORIZONTAL);
-        android.widget.LinearLayout.LayoutParams crLp =
-                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
-        crLp.topMargin = dp(14);
-        list.addView(credit, crLp);
-
-        // Per-row click handlers (mirror d-pad activation).
-        for (int i = 0; i < aboutRows.length; i++) {
-            final int idx = i;
-            android.widget.LinearLayout row = aboutRows[i];
-            if (row == null) continue;
-            row.setClickable(true);
-            row.setOnClickListener(v -> {
-                v.playSoundEffect(SoundEffectConstants.CLICK);
-                aboutSelectedRow = idx;
-                refreshAboutRows();
-                showAboutQr(idx);
-            });
-        }
-
-        // ── QR sub-view (swaps in over the list) ──
-        android.widget.LinearLayout qr = new android.widget.LinearLayout(this);
-        qr.setOrientation(android.widget.LinearLayout.VERTICAL);
-        qr.setGravity(Gravity.CENTER_HORIZONTAL);
-        qr.setVisibility(View.GONE);
-
-        ImageView qrImg = new ImageView(this);
-        // White plate behind the QR so the quiet zone always reads cleanly
-        // regardless of the (dark) card colour.
-        android.graphics.drawable.GradientDrawable qrPlate =
-                new android.graphics.drawable.GradientDrawable();
-        qrPlate.setColor(0xFFFFFFFF);
-        qrPlate.setCornerRadius(dp(16));
-        qrImg.setBackground(qrPlate);
-        qrImg.setPadding(dp(10), dp(10), dp(10), dp(10));
-        int qrSz = dp(216);
-        qr.addView(qrImg, new android.widget.LinearLayout.LayoutParams(qrSz, qrSz));
-
-        TextView cap = new TextView(this);
-        cap.setTextColor(0xCCFFFFFF);
-        cap.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12);
-        cap.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-        cap.setGravity(Gravity.CENTER_HORIZONTAL);
-        android.widget.LinearLayout.LayoutParams capLp =
-                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
-        capLp.topMargin = dp(12);
-        qr.addView(cap, capLp);
-
-        // Clickable link under the QR — opens the same URL in the user's
-        // browser (for boxes that have one). Styled as a rounded pill so it
-        // reads as a button; it is the QR page's single actionable element,
-        // so OK on the QR page activates it (see handleAboutKey). Touch
-        // devices get the OnClickListener too. Dependency-free: a plain
-        // ACTION_VIEW intent, guarded so a browser-less TV just shows a toast.
-        TextView link = new TextView(this);
-        link.setTextColor(0xFF8AB4F8);   // accent "link" blue
-        link.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-        link.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        link.setGravity(Gravity.CENTER);
-        link.setSingleLine(true);
-        link.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        link.setPadding(dp(14), dp(9), dp(14), dp(9));
-        android.graphics.drawable.GradientDrawable linkBg =
-                new android.graphics.drawable.GradientDrawable();
-        linkBg.setCornerRadius(dp(10));
-        linkBg.setColor(0x1AFFFFFF);
-        linkBg.setStroke(Math.max(1, dp(1) / 2), 0x338AB4F8);
-        link.setBackground(linkBg);
-        link.setClickable(true);
-        link.setFocusable(false);   // d-pad activation is handled in handleAboutKey
-        link.setOnClickListener(v -> {
-            v.playSoundEffect(SoundEffectConstants.CLICK);
-            openInBrowser(aboutQrUrl);
-        });
-        android.widget.LinearLayout.LayoutParams linkLp =
-                new android.widget.LinearLayout.LayoutParams(contentW, WRAP);
-        linkLp.topMargin = dp(12);
-        qr.addView(link, linkLp);
-
-        card.addView(list);
-        card.addView(qr);
-
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        cardLp.gravity = Gravity.CENTER;
-        card.setLayoutParams(cardLp);
-        ov.addView(card);
-        r.addView(ov);
-
-        aboutOverlay   = ov;
-        aboutCard      = card;
-        aboutListView  = list;
-        aboutQrView    = qr;
-        aboutQrImage   = qrImg;
-        aboutQrCaption = cap;
-        aboutQrLink    = link;
-    }
-
-    /** Build one About list row: optional leading icon + label, with a
-     *  rounded background that the selection paint fills. Full content width
-     *  so the selection pill spans the card. */
-    private android.widget.LinearLayout buildAboutRow(String label, View icon, int width) {
-        android.widget.LinearLayout row = new android.widget.LinearLayout(this);
-        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(9), dp(14), dp(9));
-        android.graphics.drawable.GradientDrawable bg =
-                new android.graphics.drawable.GradientDrawable();
-        bg.setCornerRadius(dp(10));
-        bg.setColor(Color.TRANSPARENT);
-        row.setBackground(bg);
-        if (icon != null) {
-            android.widget.LinearLayout.LayoutParams ic =
-                    new android.widget.LinearLayout.LayoutParams(dp(22), dp(22));
-            ic.setMarginEnd(dp(10));
-            row.addView(icon, ic);
-        }
-        TextView tv = new TextView(this);
-        tv.setText(label);
-        tv.setTextColor(0xE6FFFFFF);
-        tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
-        tv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        tv.setSingleLine(true);
-        tv.setEllipsize(TextUtils.TruncateAt.END);
-        row.addView(tv, new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f));
-
-        android.widget.LinearLayout.LayoutParams rlp =
-                new android.widget.LinearLayout.LayoutParams(width, WRAP);
-        rlp.topMargin = dp(2);
-        rlp.bottomMargin = dp(2);
-        row.setLayoutParams(rlp);
-        return row;
-    }
-
-    /** A small Ko-fi-style coffee cup, drawn into a bitmap (no asset). */
-    private View makeKofiIcon() {
-        ImageView iv = new ImageView(this);
-        iv.setImageBitmap(kofiCupBitmap(Math.max(1, dp(22)), 0xCCFFFFFF));   // white steam over the dark row
-        return iv;
-    }
-
-    /** Draw the Ko-fi coffee cup into an {@code s × s} bitmap. {@code steam}
-     *  is the steam-line colour so the cup reads on both the dark About row
-     *  (light steam) and the white QR centre plate (red steam). */
-    private Bitmap kofiCupBitmap(int s, int steam) {
-        Bitmap b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas c = new android.graphics.Canvas(b);
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final int kofiRed = 0xFFFF5E5B;
-        // Cup body.
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(kofiRed);
-        android.graphics.RectF body =
-                new android.graphics.RectF(s * 0.16f, s * 0.42f, s * 0.64f, s * 0.84f);
-        c.drawRoundRect(body, s * 0.07f, s * 0.07f, p);
-        // Handle.
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(s * 0.08f);
-        android.graphics.RectF handle =
-                new android.graphics.RectF(s * 0.58f, s * 0.48f, s * 0.84f, s * 0.78f);
-        c.drawArc(handle, -70f, 140f, false, p);
-        // Steam.
-        p.setColor(steam);
-        p.setStrokeWidth(s * 0.05f);
-        p.setStrokeCap(Paint.Cap.ROUND);
-        c.drawLine(s * 0.30f, s * 0.34f, s * 0.30f, s * 0.14f, p);
-        c.drawLine(s * 0.46f, s * 0.34f, s * 0.46f, s * 0.14f, p);
-        return b;
-    }
-
-    /** Centre-logo bitmap for an About QR, or {@code null} (plain modern code)
-     *  when none is available. Ko-fi → the coffee cup; GitHub → the octicon
-     *  mark vector. Wrapped so a missing/garbled vector can never break the QR
-     *  — the code just renders without a logo. */
-    private Bitmap aboutQrLogo(int which) {
-        try {
-            int s = Math.max(1, dp(56));
-            if (which == ABOUT_ROW_KOFI) {
-                return kofiCupBitmap(s, 0xFFFF5E5B);   // red steam reads on the white plate
-            }
-            Drawable d = getDrawable(R.drawable.logo_github);
-            if (d == null) return null;
-            Bitmap b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
-            android.graphics.Canvas c = new android.graphics.Canvas(b);
-            d.setBounds(0, 0, s, s);
-            d.draw(c);
-            return b;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private void showAboutOverlay() {
-        if (destroyed) return;
-        if (aboutOverlay == null) buildAboutOverlay();
-        final FrameLayout ov = aboutOverlay;
-        if (ov == null) return;
-        RingView rv = ringView; if (rv != null) rv.setVisibility(View.INVISIBLE);
-        ensureOverlayBackdropVisible();
-
-        aboutShowingQr = false;
-        aboutSelectedRow = 0;
-        if (aboutListView != null) aboutListView.setVisibility(View.VISIBLE);
-        if (aboutQrView != null) aboutQrView.setVisibility(View.GONE);
-        refreshAboutRows();
-
-        ov.setVisibility(View.VISIBLE);
-        ov.bringToFront();
-        ov.requestFocus();
-
-        final android.widget.LinearLayout card = aboutCard;
-        if (card != null) {
-            card.animate().cancel();
-            card.setAlpha(0f);
-            card.setScaleX(0.96f); card.setScaleY(0.92f);
-            card.post(() -> {
-                if (card != aboutCard) return;
-                card.setPivotX(card.getWidth() / 2f);
-                card.setPivotY(card.getHeight() / 2f);
-                card.animate()
-                        .alpha(1f).scaleX(1f).scaleY(1f)
-                        .setDuration(160).setInterpolator(MENU_IN).withLayer().start();
-            });
-        }
-    }
-
-    private void hideAboutOverlay() {
-        final FrameLayout ov = aboutOverlay;
-        if (ov == null) return;
-        final boolean returnToSettings = aboutOpenedFromSettings;
-        aboutOpenedFromSettings = false;
-        aboutShowingQr = false;
-        final android.widget.LinearLayout card = aboutCard;
-        final Runnable end = () -> {
-            if (ov != aboutOverlay) return;
-            ov.setVisibility(View.GONE);
-            if (returnToSettings) {
-                // Re-open the settings panel on the About row, mirroring the
-                // keymap → settings back-stack behaviour.
-                pendingSettingsCursor = SR_ABOUT;
-                showSettingsPanel();
-            } else {
-                dismissOverlayBackdropIfIdle();
-            }
-        };
-        if (card != null) {
-            card.animate().cancel();
-            card.animate()
-                    .alpha(0f).scaleX(0.96f).scaleY(0.92f)
-                    .setDuration(110).setInterpolator(MENU_OUT).withLayer()
-                    .withEndAction(end).start();
-        } else {
-            end.run();
-        }
-    }
-
-    /** Swap the list out for the QR view of the given row's link. */
-    private void showAboutQr(int which) {
-        String url = (which == ABOUT_ROW_KOFI) ? ABOUT_KOFI_URL : ABOUT_GITHUB_RELEASES;
-        aboutQrUrl = url;
-        // Modern rounded code with the matching brand mark centred. Falls back
-        // to a plain modern code if the logo can't be built; renderStyled keeps
-        // level-M error correction, which recovers the small centre plate.
-        Bitmap bmp = QrCode.renderStyled(url, dp(204), 0xFF101014, 0xFFFFFFFF,
-                aboutQrLogo(which), 0.22f);
-        if (aboutQrImage != null) aboutQrImage.setImageBitmap(bmp);
-        if (aboutQrCaption != null) {
-            aboutQrCaption.setText(which == ABOUT_ROW_KOFI
-                    ? R.string.about_qr_kofi_caption
-                    : R.string.about_qr_github_caption);
-        }
-        if (aboutQrLink != null) {
-            // Ko-fi shows the link without the "https://" scheme (cleaner, and
-            // a browser fills the scheme in anyway); GitHub shows the short
-            // "BareLauncher latest version" label. aboutQrUrl keeps the full
-            // URL for the actual open.
-            aboutQrLink.setText(which == ABOUT_ROW_KOFI
-                    ? url.replaceFirst("^https?://", "")
-                    : getString(R.string.about_github_link_button));
-        }
-        aboutShowingQr = true;
-        if (aboutListView != null) aboutListView.setVisibility(View.GONE);
-        if (aboutQrView != null) aboutQrView.setVisibility(View.VISIBLE);
-    }
-
-    /** Open {@code url} in whatever browser the user has installed. Offline,
-     *  dependency-free — a plain {@link Intent#ACTION_VIEW}. Guarded with a
-     *  resolve check so a TV box with no browser shows an honest toast
-     *  instead of throwing {@link android.content.ActivityNotFoundException}.
-     *  The launcher itself never handles {@code http(s)} VIEW intents (it has
-     *  no such filter), so this can never loop back into us. */
-    private void openInBrowser(String url) {
-        if (url == null || url.isEmpty()) return;
-        try {
-            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            if (i.resolveActivity(pm) != null) {
-                startActivity(i);
-                return;
-            }
-        } catch (Exception ignored) { /* fall through to the toast */ }
-        showToast(getString(R.string.toast_no_browser));
-    }
-
-    /** Return from the QR view back to the row list. */
-    private void showAboutList() {
-        aboutShowingQr = false;
-        if (aboutQrView != null) aboutQrView.setVisibility(View.GONE);
-        if (aboutListView != null) aboutListView.setVisibility(View.VISIBLE);
-        refreshAboutRows();
-    }
-
-    /** Paint the selected About row's pill + invert its text. */
-    private void refreshAboutRows() {
-        final int selBg = 0xFFEFEFEF, idleBg = Color.TRANSPARENT;
-        final int selTx = 0xFF111114, idleTx = 0xE6FFFFFF;
-        for (int i = 0; i < aboutRows.length; i++) {
-            android.widget.LinearLayout row = aboutRows[i];
-            if (row == null) continue;
-            boolean sel = (i == aboutSelectedRow);
-            android.graphics.drawable.Drawable bg = row.getBackground();
-            if (bg instanceof android.graphics.drawable.GradientDrawable) {
-                ((android.graphics.drawable.GradientDrawable) bg).setColor(sel ? selBg : idleBg);
-            }
-            for (int c = 0; c < row.getChildCount(); c++) {
-                View ch = row.getChildAt(c);
-                if (ch instanceof TextView) ((TextView) ch).setTextColor(sel ? selTx : idleTx);
-            }
-        }
-    }
-
-    /** D-pad / OK / Back handling for the About overlay. */
-    private boolean handleAboutKey(int kc) {
-        if (aboutShowingQr) {
-            switch (kc) {
-                // OK activates the link button → open in the user's browser.
-                case KeyEvent.KEYCODE_DPAD_CENTER:
-                case KeyEvent.KEYCODE_ENTER:
-                case KeyEvent.KEYCODE_BUTTON_A:
-                    openInBrowser(aboutQrUrl);
-                    return true;
-                // Back returns to the row list.
-                case KeyEvent.KEYCODE_BACK:
-                    showAboutList();
-                    return true;
-                default:
-                    // Swallow stray navigation/buttons so they can't bleed to
-                    // the surface underneath, but let device-control keys
-                    // (volume / mute / power / media) reach the platform — so
-                    // the DOWN edge stays balanced with the UP edge that
-                    // dispatchKeyEvent already lets through via isLetThroughKey.
-                    return !isLetThroughKey(kc);
-            }
-        }
-        switch (kc) {
-            case KeyEvent.KEYCODE_DPAD_UP:
-                aboutSelectedRow = (aboutSelectedRow + aboutRows.length - 1) % aboutRows.length;
-                refreshAboutRows();
-                return true;
-            case KeyEvent.KEYCODE_DPAD_DOWN:
-                aboutSelectedRow = (aboutSelectedRow + 1) % aboutRows.length;
-                refreshAboutRows();
-                return true;
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_BUTTON_A:
-                showAboutQr(aboutSelectedRow);
-                return true;
-            case KeyEvent.KEYCODE_BACK:
-                hideAboutOverlay();
-                return true;
-            default:
-                return false;
         }
     }
 
@@ -9266,18 +8414,6 @@ public class LauncherActivity extends Activity {
             is24Hour = detected;
             clockFmt.reset(); // force repaint with new hour format
         }
-        if (!showClock) {
-            // Toggle is off: ensure the pill is hidden and no tick is
-            // scheduled. tickClock would short-circuit anyway, but dropping
-            // the postDelayed entirely means zero CPU per minute on installs
-            // that opt out of the clock — the configured "0 cost when off"
-            // contract from the v1.3.0 design discussion.
-            clockRunning = false;
-            uiHandler.removeCallbacks(clockTick);
-            TextView cv = clockView;
-            if (cv != null) cv.setVisibility(View.GONE);
-            return;
-        }
         TextView cv = clockView;
         if (cv != null) cv.setVisibility(View.VISIBLE);
         if (!clockRunning) {
@@ -9352,8 +8488,7 @@ public class LauncherActivity extends Activity {
                 prefs.getString(KEY_APP_ORDER, ""),
                 hc,
                 prefs.getString(KEY_KEYMAP, ""),
-                prefs.getString(KEY_HIDDEN, ""),
-                clockMode);
+                prefs.getString(KEY_HIDDEN, ""));
         try (java.io.OutputStream os = getContentResolver().openOutputStream(uri, "w")) {
             if (os == null) { showToast(getString(R.string.toast_backup_failed)); return; }
             os.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -9401,12 +8536,6 @@ public class LauncherActivity extends Activity {
         if (p.has(SettingsBackup.K_HIDDEN))    ed.putString(KEY_HIDDEN,    p.str(SettingsBackup.K_HIDDEN));
         int hc = p.intVal(SettingsBackup.K_HOME_COUNT, -1);
         if (hc >= 1) ed.putInt(KEY_HOME_COUNT, hc);
-        int cm = p.intVal(SettingsBackup.K_CLOCK_MODE, -1);
-        boolean applyClock = (cm >= CLOCK_FULL && cm <= CLOCK_OFF);
-        if (applyClock) {
-            ed.putInt(KEY_CLOCK_MODE, cm);
-            ed.putBoolean(KEY_SHOW_CLOCK, cm != CLOCK_OFF);   // keep legacy key in sync
-        }
         ed.apply();
 
         // Reload in-memory state from the freshly-written prefs.
@@ -9427,774 +8556,8 @@ public class LauncherActivity extends Activity {
         // Converge the on-disk order cache with the restored order.
         saveOrder();
 
-        if (applyClock) {
-            clockMode = cm;
-            showClock = (cm != CLOCK_OFF);
-            if (showClock) {
-                clockFmt.reset();
-                TextView cv = clockView; if (cv != null) cv.setVisibility(View.VISIBLE);
-                startClock();
-                tickClock(System.currentTimeMillis());
-            } else {
-                stopClock();
-                TextView cv = clockView; if (cv != null) cv.setVisibility(View.GONE);
-            }
-        }
         showToast(getString(R.string.toast_restore_done));
     }
-
-    // ── Wallpaper slideshow engine ───────────────────────────────────────
-
-    /** Load persisted slideshow state into the in-memory fields. Called once
-     *  from {@link #initCaches}. */
-    private void loadSlideshowPrefs() {
-        slideshowFolderUri   = prefs.getString(KEY_SLIDESHOW_FOLDER, null);
-        slideshowDurationSec = prefs.getInt(KEY_SLIDESHOW_DURATION, 0);
-        slideshowRestart     = prefs.getBoolean(KEY_SLIDESHOW_RESTART, false);
-        slideshowIndex       = Math.max(0, prefs.getInt(KEY_SLIDESHOW_INDEX, 0));
-        // Sanitise an out-of-range stored duration to Off.
-        boolean legal = false;
-        for (int s : SLIDESHOW_STEPS_SEC) if (s == slideshowDurationSec) { legal = true; break; }
-        if (!legal) slideshowDurationSec = 0;
-        // Idle-hide timeout.
-        idleHideSec = prefs.getInt(KEY_IDLE_HIDE, 0);
-        boolean legalIdle = false;
-        for (int s : IDLE_HIDE_STEPS_SEC) if (s == idleHideSec) { legalIdle = true; break; }
-        if (!legalIdle) idleHideSec = 0;
-    }
-
-    /** {@code true} when the slideshow controls the wallpaper: a folder is set
-     *  and at least one rotation trigger (timer or each-restart) is on. */
-    private boolean slideshowActive() {
-        return slideshowFolderUri != null && (slideshowDurationSec > 0 || slideshowRestart);
-    }
-
-    /** Human label for the current duration setting. */
-    private String slideshowDurationLabel() {
-        int s = slideshowDurationSec;
-        if (s <= 0)   return "Off";
-        if (s < 60)   return "< " + s + "s >";
-        if (s == 90)  return "< 1.5 min >";
-        if (s % 60 == 0) return "< " + (s / 60) + " min >";
-        return "< " + s + "s >";
-    }
-
-    /** Human label for the idle-hide timeout setting. */
-    private String idleHideLabel() {
-        int s = idleHideSec;
-        if (s <= 0)  return "Off";
-        if (s < 60)  return "< " + s + "s >";
-        if (s % 60 == 0) return "< " + (s / 60) + " min >";
-        return "< " + s + "s >";
-    }
-
-    /** Whether the media-read permission needed to browse image folders is
-     *  granted.
-     *  <ul>
-     *    <li>API 26–32: READ_EXTERNAL_STORAGE</li>
-     *    <li>API 33   : READ_MEDIA_IMAGES (full library)</li>
-     *    <li>API 34+  : READ_MEDIA_IMAGES (full) OR
-     *                   READ_MEDIA_VISUAL_USER_SELECTED (partial — user
-     *                   picked specific photos). Either grant is sufficient
-     *                   for our MediaStore bucket query; partial access may
-     *                   return a smaller folder list, but that is fine.</li>
-     *  </ul> */
-    private boolean hasMediaReadPermission() {
-        if (Build.VERSION.SDK_INT >= 34) {  // UPSIDE_DOWN_CAKE
-            // Android 14+: full OR partial grant is enough.
-            return checkSelfPermission(android.Manifest.permission.READ_MEDIA_IMAGES)
-                            == android.content.pm.PackageManager.PERMISSION_GRANTED
-                    || checkSelfPermission("android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
-                            == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        }
-        String p = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                ? android.Manifest.permission.READ_MEDIA_IMAGES
-                : android.Manifest.permission.READ_EXTERNAL_STORAGE;
-        return checkSelfPermission(p) == android.content.pm.PackageManager.PERMISSION_GRANTED;
-    }
-
-    /** Open the slideshow folder picker: a custom, TV-native list of image
-     *  folders from MediaStore (no SAF folder picker, which Google TV lacks).
-     *  Requests the media-read permission first if needed.
-     *  On API 34+ we request READ_MEDIA_IMAGES + READ_MEDIA_VISUAL_USER_SELECTED
-     *  together so the system shows the full chooser with the "Select photos"
-     *  partial-access option. */
-    private void pickSlideshowFolder() {
-        if (hasMediaReadPermission()) { scanAndShowFolderPicker(); return; }
-        try {
-            if (Build.VERSION.SDK_INT >= 34) {  // UPSIDE_DOWN_CAKE
-                // Request both so the system dialog offers full AND partial access.
-                requestPermissions(new String[]{
-                        android.Manifest.permission.READ_MEDIA_IMAGES,
-                        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
-                }, REQ_PERM_MEDIA);
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                requestPermissions(new String[]{ android.Manifest.permission.READ_MEDIA_IMAGES },
-                        REQ_PERM_MEDIA);
-            } else {
-                requestPermissions(new String[]{ android.Manifest.permission.READ_EXTERNAL_STORAGE },
-                        REQ_PERM_MEDIA);
-            }
-        } catch (Exception e) { showToast(getString(R.string.toast_slideshow_need_permission)); }
-    }
-
-    /** Scan image folders off the UI thread, then show the picker. Uses a
-     *  dedicated one-shot thread (not the bounded app executor) so this
-     *  user-initiated action is never silently dropped. */
-    private void scanAndShowFolderPicker() {
-        new Thread(() -> {
-            final java.util.List<String[]> folders = scanImageFolders();
-            uiHandler.post(() -> { if (!destroyed) showFolderPicker(folders); });
-        }, "wp-folder-scan").start();
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
-        super.onRequestPermissionsResult(req, perms, results);
-        if (req == REQ_PERM_MEDIA) {
-            if (results != null && results.length > 0
-                    && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                scanAndShowFolderPicker();
-            } else {
-                showToast(getString(R.string.toast_slideshow_need_permission));
-            }
-        }
-    }
-
-    /** Step the duration through {@link #SLIDESHOW_STEPS_SEC}. Persists,
-     *  repaints the indicator, and (re)arms the timer. Turning ON from Off
-     *  shows an image immediately; stepping between intervals only re-arms the
-     *  timer (no flickery re-decode on every press). */
-    private void stepSlideshowDuration(int dir) {
-        int idx = 0;
-        for (int i = 0; i < SLIDESHOW_STEPS_SEC.length; i++) {
-            if (SLIDESHOW_STEPS_SEC[i] == slideshowDurationSec) { idx = i; break; }
-        }
-        int prev = slideshowDurationSec;
-        idx = (idx + dir + SLIDESHOW_STEPS_SEC.length) % SLIDESHOW_STEPS_SEC.length;
-        slideshowDurationSec = SLIDESHOW_STEPS_SEC[idx];
-        prefs.edit().putInt(KEY_SLIDESHOW_DURATION, slideshowDurationSec).apply();
-        // Mutual exclusion: enabling the interval timer turns off "change each restart".
-        if (prev == 0 && slideshowDurationSec != 0 && slideshowRestart) {
-            slideshowRestart = false;
-            prefs.edit().putBoolean(KEY_SLIDESHOW_RESTART, false).apply();
-        }
-        refreshSettingsRows();
-        if (slideshowDurationSec != 0 && slideshowFolderUri == null) {
-            showToast(getString(R.string.toast_slideshow_pick_folder));
-        }
-        if (prev == 0 && slideshowDurationSec != 0) kickSlideshowNow();
-        restartSlideshowTimer();
-    }
-
-    /** Toggle "change on each restart". Persists and repaints; when turned on
-     *  it also shows an image straight away so the user sees it take effect. */
-    private void toggleSlideshowRestart() {
-        slideshowRestart = !slideshowRestart;
-        prefs.edit().putBoolean(KEY_SLIDESHOW_RESTART, slideshowRestart).apply();
-        // Mutual exclusion: enabling "change each restart" turns off the interval timer.
-        if (slideshowRestart && slideshowDurationSec != 0) {
-            slideshowDurationSec = 0;
-            prefs.edit().putInt(KEY_SLIDESHOW_DURATION, 0).apply();
-            restartSlideshowTimer();   // cancels the in-flight postDelayed
-        }
-        refreshSettingsRows();
-        if (slideshowRestart && slideshowFolderUri == null) {
-            showToast(getString(R.string.toast_slideshow_pick_folder));
-        }
-        // Surface an image immediately when turning ON (duration is already 0 here,
-        // either it was always 0 or we just zeroed it above).
-        if (slideshowRestart) kickSlideshowNow();
-    }
-
-    /** Show an image right away when the slideshow is first switched on. */
-    private void kickSlideshowNow() {
-        if (slideshowFolderUri == null) return;
-        if (slideshowImages == null) enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
-        else                         applyCurrentSlideshowImage();
-    }
-
-    /** Enumerate the folder's images on a dedicated one-shot thread, then run
-     *  {@code onReady} on the UI thread. No-op if no folder is set.
-     *  <p>Deliberately NOT on {@link #appExecutor}: that single-thread executor
-     *  has a 1-deep queue and a {@code DiscardPolicy}, so a slideshow scan
-     *  submitted during the cold-start app scan would be silently dropped —
-     *  leaving {@code slideshowImages} null forever and the rotation / each-
-     *  restart change dead until a manual folder re-pick. A short-lived thread
-     *  (the same pattern as the folder-picker scan) always runs, costs nothing
-     *  once it exits, and never contends with the app scan. */
-    private void enumerateSlideshowAsync(Runnable onReady) {
-        final String folder = slideshowFolderUri;
-        if (folder == null) return;
-        try {
-            new Thread(() -> {
-                final String[] imgs = listSlideshowImages(folder);
-                uiHandler.post(() -> {
-                    if (destroyed) return;
-                    // Treat a failed enumeration (null — revoked permission /
-                    // unmounted storage) as an empty list, NOT "not yet loaded".
-                    // Otherwise advanceSlideshow's onReady=advance would see
-                    // null and re-enumerate forever. Empty stops cleanly; a
-                    // folder re-pick resets this back to null to retry.
-                    slideshowImages = (imgs != null) ? imgs : new String[0];
-                    // Reset retry counter on success (non-empty array) so future
-                    // retries work if MediaStore temporarily fails again.
-                    if (imgs != null && imgs.length > 0) {
-                        slideshowEnumerationRetries = 0;
-                    }
-                    if (onReady != null) onReady.run();
-                });
-            }, "wp-slideshow-scan").start();
-        } catch (Exception ignored) { /* thread create failed — extremely rare */ }
-    }
-
-    /** List the images in the chosen MediaStore folder (bucket), sorted by
-     *  display name for a stable sequential order. Runs on a background
-     *  thread. {@code bucketId} is the {@code bucket_id} stored when the user
-     *  picked the folder. Returns {@code null} on any failure (e.g. the media
-     *  permission was revoked) so the caller treats it as "no images". */
-    private String[] listSlideshowImages(String bucketId) {
-        if (bucketId == null || bucketId.isEmpty()) return new String[0];
-        Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-        ArrayList<String> out = new ArrayList<>();
-        String colId     = android.provider.MediaStore.Images.ImageColumns.BUCKET_ID;
-        String colDispNm = android.provider.MediaStore.Images.Media.DISPLAY_NAME;
-        try (android.database.Cursor cur = getContentResolver().query(
-                base,
-                new String[]{ android.provider.MediaStore.Images.Media._ID },
-                colId + " = ?",
-                new String[]{ bucketId },
-                colDispNm + " ASC")) {
-            if (cur != null) {
-                int idCol = cur.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media._ID);
-                while (cur.moveToNext()) {
-                    long id = cur.getLong(idCol);
-                    out.add(android.content.ContentUris.withAppendedId(base, id).toString());
-                }
-            }
-        } catch (Exception e) {
-            return null;
-        }
-        return out.toArray(new String[0]);
-    }
-
-    /** Scan MediaStore for image folders (buckets). Returns a list of
-     *  {@code {bucketId, displayName, count}} rows, sorted by name. Background
-     *  thread; one query. Returns an empty list on failure. */
-    private java.util.List<String[]> scanImageFolders() {
-        // Names/order kept in a LinkedHashMap (stable, sorted-by-query iteration);
-        // counts kept in a parallel int[]-valued map so tallying a bucket's photo
-        // count doesn't round-trip through Integer.parseInt/toString per row.
-        java.util.LinkedHashMap<String, String[]> names  = new java.util.LinkedHashMap<>();
-        java.util.HashMap<String, int[]>          counts = new java.util.HashMap<>();
-        Uri base = android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-        // Use symbolic constants (available since API 29) where possible; fall
-        // back to the raw column-name strings (identical value, works on all
-        // API levels since the column has been stable since API 1).
-        String colId  = android.provider.MediaStore.Images.ImageColumns.BUCKET_ID;
-        String colNm  = android.provider.MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME;
-        try (android.database.Cursor cur = getContentResolver().query(
-                base,
-                new String[]{ colId, colNm },
-                null, null,
-                colNm + " ASC")) {
-            if (cur != null) {
-                int idCol = cur.getColumnIndex(colId);
-                int nmCol = cur.getColumnIndex(colNm);
-                if (idCol >= 0 && nmCol >= 0) {
-                    while (cur.moveToNext()) {
-                        String id = cur.getString(idCol);
-                        if (id == null) continue;
-                        int[] c = counts.get(id);
-                        if (c == null) {
-                            String nm = cur.getString(nmCol);
-                            if (nm == null || nm.isEmpty()) nm = "(unnamed)";
-                            names.put(id, new String[]{ id, nm, null });
-                            counts.put(id, new int[]{ 1 });
-                        } else {
-                            c[0]++;
-                        }
-                    }
-                }
-            }
-        } catch (Exception ignored) { /* return whatever we gathered */ }
-        java.util.List<String[]> out = new ArrayList<>(names.size());
-        for (String[] row : names.values()) {
-            row[2] = Integer.toString(counts.get(row[0])[0]);
-            out.add(row);
-        }
-        return out;
-    }
-
-    /** Apply the image at the current index via the wallpaper cross-fade
-     *  pipeline. Uses {@code crossfadeUri} (not {@code applyFromUri}) so
-     *  the slideshow rotation never writes a snapshot or updates prefs —
-     *  that work is for user-picks only.
-     *  <p>No {@code resetUserLoadingGuard()} call here — if the previous
-     *  image is still decoding, we let the guard silently drop this tick.
-     *  Resetting it would start two concurrent decodes that race to call
-     *  {@code crossfade()}, the second cancels the first's in-flight
-     *  animation, and the 200 ms fade never completes visibly. The timer
-     *  fires again at the next interval when the executor is clear. */
-    private void applyCurrentSlideshowImage() {
-        String[] imgs = slideshowImages;
-        if (imgs == null || imgs.length == 0 || wallpaperCtl == null) return;
-        int idx = ((slideshowIndex % imgs.length) + imgs.length) % imgs.length;
-        try {
-            Uri u = Uri.parse(imgs[idx]);
-            wallpaperCtl.crossfadeUri(u);
-        } catch (Exception ignored) { /* bad uri — skip */ }
-    }
-
-    /** Advance to the next image and apply it. Re-enumerates first if the
-     *  list isn't ready yet (then retries via the onReady callback). */
-    private void advanceSlideshow() {
-        String[] imgs = slideshowImages;
-        if (imgs == null) { enumerateSlideshowAsync(this::advanceSlideshow); return; }
-        // Empty array means MediaStore query failed. Reset to null so the next
-        // timer tick will re-enumerate. The timer provides natural retry spacing.
-        if (imgs.length == 0) {
-            slideshowImages = null;
-            return;
-        }
-        slideshowIndex = (slideshowIndex + 1) % imgs.length;
-        prefs.edit().putInt(KEY_SLIDESHOW_INDEX, slideshowIndex).apply();
-        applyCurrentSlideshowImage();
-    }
-
-    /** (Re)arm the foreground interval timer for the current setting, or cancel
-     *  it when off / paused / no folder. Cheap: one pending message at most.
-     *  Does NOT enumerate or show an image — that's handled by
-     *  {@link #slideshowRestartAdvanceOnce} on the first resume after process
-     *  start. This only arms the NEXT rotation. */
-    private void restartSlideshowTimer() {
-        uiHandler.removeCallbacks(slideshowTick);
-        if (uiPaused || slideshowFolderUri == null || slideshowDurationSec <= 0) return;
-        uiHandler.postDelayed(slideshowTick, slideshowDurationSec * 1000L);
-    }
-
-    /** Once per process: when in "each restart" mode, roll to the next image
-     *  after the instant snapshot has already painted. When "each restart" is
-     *  off but the slideshow is active, restore the current image so a cold
-     *  restart doesn't leave the stock wallpaper visible. */
-    private void slideshowRestartAdvanceOnce() {
-        if (slideshowRestartApplied) return;
-        if (slideshowFolderUri == null) return;
-        if (!slideshowRestart && slideshowDurationSec <= 0) return;
-        slideshowRestartApplied = true;
-        if (slideshowRestart) {
-            // "Change on each restart" mode - advance with aggressive retry.
-            // On device reboot, MediaStore might not be ready yet, so we need
-            // the same retry logic as the duration-only path.
-            advanceSlideshowWithRetry();
-        } else {
-            // Duration is set but "each restart" is off — just show the current
-            // saved image without advancing the index.
-            if (slideshowImages == null) {
-                // On device reboot, MediaStore might not be ready yet. The enumeration
-                // will retry automatically when the first timer tick fires. But we
-                // still attempt the load here so it works when MediaStore IS ready.
-                enumerateSlideshowAsync(this::applyCurrentSlideshowImageWithRetry);
-            } else {
-                applyCurrentSlideshowImage();
-            }
-        }
-    }
-
-    /** Advance to next image with aggressive retry for cold-start scenarios. */
-    private void advanceSlideshowWithRetry() {
-        String[] imgs = slideshowImages;
-        if (imgs == null) { 
-            enumerateSlideshowAsync(this::advanceSlideshowWithRetry); 
-            return; 
-        }
-        if (imgs.length == 0) {
-            // Empty array means MediaStore query failed (likely device reboot).
-            // Use the shared retry helper.
-            retryMediaStoreEnumerationIfNeeded(this::advanceSlideshowWithRetry);
-            return;
-        }
-        // Success - advance and apply
-        slideshowIndex = (slideshowIndex + 1) % imgs.length;
-        prefs.edit().putInt(KEY_SLIDESHOW_INDEX, slideshowIndex).apply();
-        applyCurrentSlideshowImage();
-    }
-
-    /** Apply the current slideshow image, and if the images array is empty
-     *  (MediaStore not ready on device reboot), schedule a retry after a delay. */
-    private void applyCurrentSlideshowImageWithRetry() {
-        String[] imgs = slideshowImages;
-        if (imgs != null && imgs.length == 0) {
-            // Empty array means MediaStore query failed (likely device reboot).
-            // Use the shared retry helper.
-            retryMediaStoreEnumerationIfNeeded(this::applyCurrentSlideshowImageWithRetry);
-            return;
-        }
-        applyCurrentSlideshowImage();
-    }
-
-    /** Max retries / spacing for {@link #retryMediaStoreEnumerationIfNeeded}.
-     *  6 retries at 3 s each gives a slow TV box up to 18 s after boot for
-     *  MediaStore to come up before the slideshow gives up for the session. */
-    private static final int  SLIDESHOW_ENUM_MAX_RETRIES = 6;
-    private static final long SLIDESHOW_ENUM_RETRY_MS    = 3000L;
-
-    /** Shared retry helper for MediaStore enumeration failures. Retries up to
-     *  {@link #SLIDESHOW_ENUM_MAX_RETRIES} times, spaced
-     *  {@link #SLIDESHOW_ENUM_RETRY_MS} apart. MediaStore is usually ready
-     *  within 1-6 seconds of device boot, but slower TV boxes can take longer. */
-    private void retryMediaStoreEnumerationIfNeeded(Runnable onReady) {
-        if (slideshowEnumerationRetries < SLIDESHOW_ENUM_MAX_RETRIES
-                && slideshowFolderUri != null && !destroyed) {
-            slideshowEnumerationRetries++;
-            uiHandler.postDelayed(() -> {
-                if (!destroyed && slideshowFolderUri != null) {
-                    slideshowImages = null;  // Force re-enumeration
-                    enumerateSlideshowAsync(onReady);
-                }
-            }, SLIDESHOW_ENUM_RETRY_MS);
-        }
-        // Exceeded retry limit - MediaStore is broken or folder is empty.
-        // The caller will handle this gracefully (no-op or fallback).
-    }
-
-    // ── Idle UI hide (slideshow-only visual cleanup) ──────────────────────
-
-    /** Cycle the idle-hide timeout. {@code dir} is +1 (forward) or -1 (back). */
-    private void stepIdleHide(int dir) {
-        int idx = 0;
-        for (int i = 0; i < IDLE_HIDE_STEPS_SEC.length; i++) {
-            if (IDLE_HIDE_STEPS_SEC[i] == idleHideSec) { idx = i; break; }
-        }
-        idx = (idx + dir + IDLE_HIDE_STEPS_SEC.length) % IDLE_HIDE_STEPS_SEC.length;
-        idleHideSec = IDLE_HIDE_STEPS_SEC[idx];
-        prefs.edit().putInt(KEY_IDLE_HIDE, idleHideSec).apply();
-        refreshSettingsRows();
-        scheduleIdleHide();
-    }
-
-    /** (Re)arm the idle-hide timer. Safe to call on every key press —
-     *  cancels any pending trigger and posts a fresh one if the feature
-     *  is configured and the slideshow is active. No-op otherwise. */
-    private void scheduleIdleHide() {
-        uiHandler.removeCallbacks(idleHideTrigger);
-        if (idleHideSec > 0 && slideshowActive() && !uiPaused)
-            uiHandler.postDelayed(idleHideTrigger, idleHideSec * 1000L);
-    }
-
-    /** Cancel the timer and, if the UI is hidden, restore it immediately
-     *  (no animation — used by onPause / overlay open). */
-    private void cancelAndRestoreIdleHide() {
-        uiHandler.removeCallbacks(idleHideTrigger);
-        if (idleHideActive) applyIdleHide(false);
-    }
-
-    /** Fade home UI in (active=false) or out (active=true).
-     *  Views hidden: shelf, netBtn, mapperBtnView, ringView.
-     *  Views kept visible: wallpaper (always), clockView (always).
-     *  Duration: 500 ms out, 250 ms in — smooth but snappy. */
-    private void applyIdleHide(boolean hide) {
-        if (idleHideActive == hide) return;
-        idleHideActive = hide;
-        float target = hide ? 0f : 1f;
-        long dur     = hide ? 500L : 250L;
-        RecyclingShelfView s = shelf;
-        View nb = netBtn, mb = mapperBtnView;
-        RingView rv = ringView;
-        if (s  != null) s .animate().alpha(target).setDuration(dur).start();
-        if (nb != null) nb.animate().alpha(hide ? 0f : 0.6f).setDuration(dur).start();
-        if (mb != null) mb.animate().alpha(hide ? 0f : 0.6f).setDuration(dur).start();
-        if (rv != null) rv.animate().alpha(target).setDuration(dur).start();
-        // Clock stays fully visible — it is the reason idle-hide exists
-        // (wallpaper + clock, nothing else).
-    }
-
-    // ── Slideshow folder picker overlay ──────────────────────────────────
-
-    /** Show the custom folder picker for the scanned {@code folders}. */
-    private void showFolderPicker(java.util.List<String[]> folders) {
-        if (folders == null || folders.isEmpty()) {
-            showToast(getString(R.string.toast_slideshow_no_folders));
-            return;
-        }
-        folderPickerData.clear();
-        folderPickerData.addAll(folders);
-        if (folderPickerOverlay == null) buildFolderPickerOverlay();
-        if (folderPickerOverlay == null) return;
-        final android.widget.LinearLayout card = folderPickerCard;
-        populateFolderPicker();
-        // Land on the currently-chosen folder if it's still present.
-        folderPickerSel = 0;
-        if (slideshowFolderUri != null) {
-            for (int i = 0; i < folderPickerData.size(); i++) {
-                if (slideshowFolderUri.equals(folderPickerData.get(i)[0])) { folderPickerSel = i; break; }
-            }
-        }
-        refreshFolderPickerRows();
-        ensureOverlayBackdropVisible();
-        folderPickerOverlay.setVisibility(View.VISIBLE);
-        folderPickerOverlay.bringToFront();
-        folderPickerOverlay.requestFocus();
-        scrollFolderPickerToSelection();
-
-        // Anchor below the gear button — same math as the keymap card.
-        if (card != null) anchorCardUnderGear(card, dp(78), dp(20));
-
-        // Drop-down animation: same as keymap / settings card.
-        if (card != null) {
-            card.animate().cancel();
-            card.setAlpha(0f);
-            card.setScaleX(0.94f); card.setScaleY(0.86f);
-            card.setTranslationY(-dp(6));
-            card.post(() -> {
-                if (card != folderPickerCard) return;
-                card.setPivotX(card.getWidth());
-                card.setPivotY(0f);
-                card.animate()
-                        .alpha(1f)
-                        .scaleX(1f).scaleY(1f)
-                        .translationY(0f)
-                        .setDuration(160)
-                        .setInterpolator(MENU_IN)
-                        .withLayer()
-                        .start();
-            });
-        }
-    }
-
-    private void buildFolderPickerOverlay() {
-        FrameLayout r = root; if (r == null) return;
-        FrameLayout ov = new FrameLayout(this) {
-            @Override public boolean onTouchEvent(MotionEvent ev) {
-                if (ev.getAction() == MotionEvent.ACTION_DOWN) {
-                    android.widget.LinearLayout c = folderPickerCard;
-                    if (c != null) {
-                        float x = ev.getX(), y = ev.getY();
-                        float l = c.getX(), t = c.getY();
-                        float rt = l + c.getWidth(), b = t + c.getHeight();
-                        if (x < l || x > rt || y < t || y > b) {
-                            hideFolderPicker(); return true;
-                        }
-                    }
-                }
-                return true;
-            }
-        };
-        ov.setLayoutParams(new FrameLayout.LayoutParams(MATCH, MATCH));
-        ov.setVisibility(View.GONE);
-        ov.setClickable(true);
-        ov.setFocusable(true);
-        ov.setFocusableInTouchMode(true);
-
-        // Match the keymap card exactly: deep slate, 14 dp corners, 1 px rim,
-        // dp(8) padding, dp(10) elevation, dp(8) inner padding.
-        android.widget.LinearLayout card = new android.widget.LinearLayout(this);
-        card.setOrientation(android.widget.LinearLayout.VERTICAL);
-        android.graphics.drawable.GradientDrawable cardBg =
-                new android.graphics.drawable.GradientDrawable();
-        cardBg.setColor(0xF21A1A1F);
-        cardBg.setCornerRadius(dp(14));
-        cardBg.setStroke(1, 0x1AFFFFFF);
-        card.setBackground(cardBg);
-        card.setPadding(dp(8), dp(8), dp(8), dp(8));
-        card.setElevation(dp(10));
-
-        // Title — same style as keymap / hide-manager title.
-        TextView title = new TextView(this);
-        title.setText(R.string.folder_picker_title);
-        title.setTextColor(0xFFEFEFEF);
-        title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setLetterSpacing(0.04f);
-        title.setPadding(dp(4), dp(2), dp(4), dp(8));
-        card.addView(title);
-
-        // Capped ScrollView: wraps short lists, scrolls long ones.
-        final int maxH = Math.max(dp(120), Math.min(dp(368), screenH - dp(140)));
-        android.widget.ScrollView sv = new android.widget.ScrollView(this) {
-            @Override protected void onMeasure(int wSpec, int hSpec) {
-                super.onMeasure(wSpec,
-                        View.MeasureSpec.makeMeasureSpec(maxH, View.MeasureSpec.AT_MOST));
-            }
-        };
-        sv.setVerticalScrollBarEnabled(false);
-        sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
-        android.widget.LinearLayout colL = new android.widget.LinearLayout(this);
-        colL.setOrientation(android.widget.LinearLayout.VERTICAL);
-        sv.addView(colL, new android.widget.FrameLayout.LayoutParams(MATCH, WRAP));
-        // Fixed card content width: wide enough for a decent folder name +
-        // count, narrow enough to stay compact. Name uses weight=1 to fill
-        // this budget; count sits at the right edge.
-        card.addView(sv, new android.widget.LinearLayout.LayoutParams(dp(220), WRAP));
-
-        // Anchor top-right (same as keymap / settings card).
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(WRAP, WRAP);
-        cardLp.gravity = Gravity.TOP | Gravity.END;
-        card.setLayoutParams(cardLp);
-        ov.addView(card);
-        r.addView(ov);
-        folderPickerOverlay = ov;
-        folderPickerCard    = card;
-        folderPickerScroll  = sv;
-        folderPickerCol     = colL;
-    }
-
-    private void populateFolderPicker() {
-        android.widget.LinearLayout col = folderPickerCol;
-        if (col == null) return;
-        col.removeAllViews();
-        for (int i = 0; i < folderPickerData.size(); i++) {
-            String[] f = folderPickerData.get(i);
-            android.widget.LinearLayout row = new android.widget.LinearLayout(this);
-            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(10), dp(7), dp(10), dp(7));
-            android.graphics.drawable.GradientDrawable rb =
-                    new android.graphics.drawable.GradientDrawable();
-            rb.setCornerRadius(dp(9));
-            rb.setColor(Color.TRANSPARENT);
-            row.setBackground(rb);
-
-            // Name: weight=1 so it fills the space between left edge and
-            // count badge — gives a full-width selector pill. Capped at
-            // dp(160) via maxWidth so a very long folder name never widens
-            // the card; it ellipsises instead.
-            TextView name = new TextView(this);
-            name.setText(f[1]);
-            name.setTextColor(0xCCFFFFFF);
-            name.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13);
-            name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            name.setSingleLine(true);
-            name.setEllipsize(TextUtils.TruncateAt.END);
-            android.widget.LinearLayout.LayoutParams nameLp =
-                    new android.widget.LinearLayout.LayoutParams(0, WRAP, 1f);
-            nameLp.setMarginEnd(dp(8));
-            row.addView(name, nameLp);
-
-            // Count: right-aligned, dim, no extra padding needed.
-            TextView count = new TextView(this);
-            count.setText(f[2]);
-            count.setTextColor(0x66FFFFFF);
-            count.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11);
-            count.setSingleLine(true);
-            row.addView(count, new android.widget.LinearLayout.LayoutParams(WRAP, WRAP));
-
-            final int idx = i;
-            row.setClickable(true);
-            row.setOnClickListener(v -> {
-                v.playSoundEffect(SoundEffectConstants.CLICK);
-                folderPickerSel = idx;
-                refreshFolderPickerRows();
-                selectFolder(idx);
-            });
-            android.widget.LinearLayout.LayoutParams rowLp =
-                    new android.widget.LinearLayout.LayoutParams(MATCH, WRAP);
-            rowLp.bottomMargin = dp(2);
-            col.addView(row, rowLp);
-        }
-    }
-
-    private void refreshFolderPickerRows() {
-        android.widget.LinearLayout col = folderPickerCol;
-        if (col == null) return;
-        for (int i = 0; i < col.getChildCount(); i++) {
-            View child = col.getChildAt(i);
-            if (!(child instanceof android.widget.LinearLayout)) continue;
-            boolean sel = (i == folderPickerSel);
-            android.graphics.drawable.Drawable d = child.getBackground();
-            if (d instanceof android.graphics.drawable.GradientDrawable)
-                ((android.graphics.drawable.GradientDrawable) d).setColor(sel ? 0xFFEFEFEF : Color.TRANSPARENT);
-            android.widget.LinearLayout row = (android.widget.LinearLayout) child;
-            View nm = row.getChildAt(0), ct = row.getChildAt(1);
-            if (nm instanceof TextView) ((TextView) nm).setTextColor(sel ? 0xFF111114 : 0xCCFFFFFF);
-            if (ct instanceof TextView) ((TextView) ct).setTextColor(sel ? 0x99111114 : 0x66FFFFFF);
-        }
-    }
-
-    private void scrollFolderPickerToSelection() {
-        final android.widget.ScrollView sv = folderPickerScroll;
-        final android.widget.LinearLayout col = folderPickerCol;
-        if (sv == null || col == null) return;
-        if (folderPickerSel < 0 || folderPickerSel >= col.getChildCount()) return;
-        final View row = col.getChildAt(folderPickerSel);
-        sv.post(() -> {
-            if (row.getHeight() == 0) return;
-            int top = row.getTop(), bottom = row.getBottom();
-            int vt = sv.getScrollY(), vb = vt + sv.getHeight();
-            if (top < vt)        sv.smoothScrollTo(0, top);
-            else if (bottom > vb) sv.smoothScrollTo(0, bottom - sv.getHeight());
-        });
-    }
-
-    private boolean handleFolderPickerKey(int kc) {
-        int n = folderPickerData.size();
-        switch (kc) {
-            case KeyEvent.KEYCODE_DPAD_UP:
-                if (n > 0) folderPickerSel = (folderPickerSel - 1 + n) % n;
-                refreshFolderPickerRows(); scrollFolderPickerToSelection(); return true;
-            case KeyEvent.KEYCODE_DPAD_DOWN:
-                if (n > 0) folderPickerSel = (folderPickerSel + 1) % n;
-                refreshFolderPickerRows(); scrollFolderPickerToSelection(); return true;
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_BUTTON_A:
-                selectFolder(folderPickerSel); return true;
-            case KeyEvent.KEYCODE_BACK:
-            case KeyEvent.KEYCODE_ESCAPE:
-                hideFolderPicker(); return true;
-        }
-        if (isLetThroughKey(kc)) return false;
-        return true;
-    }
-
-    /** Commit the chosen folder: store its bucket id, start the slideshow.
-     *  If the slideshow was completely off (no interval, no each-restart),
-     *  auto-enable a sensible default interval so picking a folder visibly
-     *  starts the rotation — the user shouldn't have to set a duration too.
-     *  Similarly, if idle-hide is off, auto-enable it to the default 2-min
-     *  timeout so the slideshow gets the "clean wallpaper + clock" experience
-     *  without requiring extra configuration. */
-    private void selectFolder(int index) {
-        if (index < 0 || index >= folderPickerData.size()) return;
-        String bucketId = folderPickerData.get(index)[0];
-        slideshowFolderUri = bucketId;
-        slideshowIndex     = 0;
-        slideshowImages    = null;
-        android.content.SharedPreferences.Editor ed = prefs.edit()
-                .putString(KEY_SLIDESHOW_FOLDER, bucketId)
-                .putInt(KEY_SLIDESHOW_INDEX, 0);
-        if (slideshowDurationSec == 0 && !slideshowRestart) {
-            slideshowDurationSec = SLIDESHOW_DEFAULT_SEC;
-            ed.putInt(KEY_SLIDESHOW_DURATION, slideshowDurationSec);
-        }
-        if (idleHideSec == 0) {
-            idleHideSec = IDLE_HIDE_DEFAULT_SEC;
-            ed.putInt(KEY_IDLE_HIDE, idleHideSec);
-        }
-        ed.apply();
-        hideFolderPicker();
-        refreshSettingsRows();   // reflect a duration we may have just auto-set
-        // Show the first image now and arm the interval timer.
-        enumerateSlideshowAsync(this::applyCurrentSlideshowImage);
-        restartSlideshowTimer();
-        scheduleIdleHide();      // arm idle-hide timer if it was just enabled
-        showToast(getString(R.string.toast_slideshow_folder_set));
-    }
-
-    private void hideFolderPicker() {
-        FrameLayout ov = folderPickerOverlay;
-        if (ov == null) return;
-        ov.setVisibility(View.GONE);
-        dismissOverlayBackdropIfIdle();
-        // Return focus to the home shelf.
-        RecyclingShelfView s = shelf;
-        if (s != null && s.getVisibility() == View.VISIBLE && !appList.isEmpty()) {
-            s.requestFocusOnIndex(Math.max(0, Math.min(s.focusedIndex, s.lastIndex())));
-        } else {
-            View nb = netBtn; if (nb != null) nb.requestFocus();
-        }
-    }
-
 
     @Override @SuppressWarnings("deprecation")
     protected void onActivityResult(int req, int res, Intent data) {
@@ -10214,16 +8577,6 @@ public class LauncherActivity extends Activity {
             if (uri != null) {
                 try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
                 catch (SecurityException e) { showToast(getString(R.string.toast_wallpaper_no_permission)); return; }
-                // Picking a single wallpaper means "I want exactly this" — turn
-                // the slideshow off so it can't override the chosen image. The
-                // folder selection is kept so it's easy to re-enable.
-                slideshowDurationSec = 0;
-                slideshowRestart     = false;
-                prefs.edit()
-                        .putInt(KEY_SLIDESHOW_DURATION, 0)
-                        .putBoolean(KEY_SLIDESHOW_RESTART, false)
-                        .apply();
-                uiHandler.removeCallbacks(slideshowTick);
                 if (wallpaperCtl != null) {
                     wallpaperCtl.resetUserLoadingGuard();
                     wallpaperCtl.applyFromUri(uri);
@@ -10448,24 +8801,6 @@ public class LauncherActivity extends Activity {
         app.allowCoreThreadTimeOut(true);
         appExecutor = app;
 
-        // Show-clock preference (v1.3.0). Cheap synchronous read after the
-        // pre-warm above guarantees the parsed map is already in memory.
-        // Default true so existing v1.2.x installs continue to render the
-        // clock pill on first launch without any opt-in step. The "show
-        // clock" toggle is a single bundled control: when true the formatter
-        // renders day-of-week + time, when false the pill is hidden and no
-        // minute tick is scheduled (zero CPU per minute).
-        // Clock display preference. v1.4.9 replaced the boolean show/hide with
-        // a 3-state mode (full → time-only → off), persisted as an int under
-        // KEY_CLOCK_MODE. Pre-1.4.9 installs only have the boolean KEY_SHOW_CLOCK,
-        // so migrate from it the first time (true → FULL, false → OFF).
-        int storedMode = prefs.getInt(KEY_CLOCK_MODE, -1);
-        if (storedMode < CLOCK_FULL || storedMode > CLOCK_OFF) {
-            storedMode = prefs.getBoolean(KEY_SHOW_CLOCK, true) ? CLOCK_FULL : CLOCK_OFF;
-        }
-        clockMode = storedMode;
-        showClock = (clockMode != CLOCK_OFF);   // convenience gate for existing tick/visibility code
-        loadSlideshowPrefs();
     }
 
     @SuppressWarnings("deprecation")
@@ -10581,7 +8916,7 @@ public class LauncherActivity extends Activity {
         tileWpx      = cw;
         bannerHpx    = Math.round(cw * 3f / 5f);        // 5:3
         tileCornerPx = Math.round(bannerHpx * 0.20f);   // slightly more rounded
-        cellHpx      = bannerHpx + dp(28);              // banner + focused-label area
+        cellHpx      = bannerHpx + dp(8);               // banner with a small bottom breathing gap
     }
 
     /** Clip a small list/chip {@link ImageView} to a circle so the shared

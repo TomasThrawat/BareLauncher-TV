@@ -13,7 +13,6 @@ import java.util.Map;
  *   home_count\t6
  *   key_map\t183=com.a,184=com.b
  *   hidden_apps\tcom.x,com.y
- *   clock_mode\t0
  * </pre>
  * Line 1 is a magic + format-version header; every following line is a
  * {@code key\tvalue} pair. The wallpaper is deliberately NOT included — it is
@@ -50,19 +49,17 @@ final class SettingsBackup {
     static final String K_HOME_COUNT = "home_count";
     static final String K_KEY_MAP    = "key_map";
     static final String K_HIDDEN     = "hidden_apps";
-    static final String K_CLOCK_MODE = "clock_mode";
 
     /** Build the backup file text. {@code null} string values are written as
      *  empty so every key is always present in a well-formed file. */
     static String serialize(String appOrder, int homeCount, String keyMap,
-                            String hiddenApps, int clockMode) {
+                            String hiddenApps) {
         StringBuilder sb = new StringBuilder(256);
         sb.append(MAGIC).append('\t').append(VERSION).append('\n');
         line(sb, K_APP_ORDER,  appOrder);
         line(sb, K_HOME_COUNT, Integer.toString(homeCount));
         line(sb, K_KEY_MAP,    keyMap);
         line(sb, K_HIDDEN,     hiddenApps);
-        line(sb, K_CLOCK_MODE, Integer.toString(clockMode));
         return sb.toString();
     }
 
