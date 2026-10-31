@@ -1,0 +1,43 @@
+version: 2.1
+
+jobs:
+  android-build:
+    docker:
+      - image: cimg/android:2026.08
+    working_directory: ~/project
+    steps:
+      - checkout
+      - run:
+          name: Prepare Gradle 8.14.5
+          command: |
+            curl --fail --location --retry 3 \
+              https://services.gradle.org/distributions/gradle-8.14.5-bin.zip \
+              --output /tmp/gradle-8.14.5-bin.zip
+            unzip -q /tmp/gradle-8.14.5-bin.zip -d /tmp
+            /tmp/gradle-8.14.5/bin/gradle --version
+      - run:
+          name: Prepare Android SDK 36
+          command: |
+            yes | sdkmanager --sdk_root="${ANDROID_HOME}" --licenses >/dev/null
+            sdkmanager --sdk_root="${ANDROID_HOME}" --install \
+              "platforms;android-36" \
+              "build-tools;36.0.0" \
+              "platform-tools"
+      - run:
+          name: Unit tests, lint, and debug APK
+          command: |
+            /tmp/gradle-8.14.5/bin/gradle \
+              -p LauncherV15 \
+              :app:testDebugUnitTest \
+              :app:lintDebug \
+              :app:assembleDebug \
+              --no-daemon \
+              --stacktrace
+      - store_artifacts:
+          path: LauncherV15/app/build/outputs/apk/debug
+          destination: debug-apk
+
+workflows:
+  build:
+    jobs:
+      - android-build
